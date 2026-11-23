@@ -50,7 +50,8 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 - [x] `/chats`, `/chat/{jid}/*`
 - [x] `/message/{id}/*` (revoke, delete, reaction, update, read, played, star, forward, download)
 - [x] Semua `/group/*` (19 route: create/join/leave/info/participants/requests/photo/name/locked/announce/topic/invite-link/export CSV)
-- [ ] Sisa `/user/*`, `/send/sticker|poll|presence|chat-presence`, `/call/reject`
+- [x] `/user/my/groups`
+- [ ] Sisa `/user/*` (avatar, pushname, my/privacy, my/newsletters, my/contacts[/detailed], business-profile, presence/subscribe), `/send/sticker|poll|presence|chat-presence`, `/call/reject`
 - [ ] Event: `message.deleted`, `presence`, `group.*`, `label.*`, `call.offer`, `device.reachout_timelock`
 - [ ] Auto reply, auto mark read, auto reject call
 

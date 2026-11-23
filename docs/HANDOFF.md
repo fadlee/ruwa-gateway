@@ -6,8 +6,8 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*` selesai; berikutnya sisa `/user/*` (`/user/my/groups` dst.), sticker/poll/presence, event grup.
-- **Build**: `cargo test` (135 test: 100 unit + 35 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups` selesai; berikutnya sisa `/user/*` (avatar, pushname, my/privacy, my/newsletters, my/contacts, business-profile, presence/subscribe), sticker/poll/presence, event grup.
+- **Build**: `cargo test` (136 test: 100 unit + 36 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -16,7 +16,7 @@
   auto-download, `/user/*`, logout dari HP (`device.logged_out`), temp ban, **chat storage** (history sync setelah
   pair, pesan masuk/keluar tersimpan, reply setelah restart), `/chat/{jid}/pin|archive|disappearing|history`
   (app-state/protocol ke WhatsApp), nama dari `ContactUpdate`, semua `/message/{id}/*` (revoke/edit/reaction/read/
-  played/star/delete-for-me/forward/download), **semua `/group/*`** (butuh akun yang ada di grup; admin untuk
+  played/star/delete-for-me/forward/download), **semua `/group/*` dan `/user/my/groups`** (butuh akun yang ada di grup; admin untuk
   name/locked/announce/topic/photo/participants). Cek via gowa-ui menu Chats/Groups atau `GET /chats`.
 - **whatsapp-rust rev**: `94877bedb6cd473864f9f6b332a5c13d5fbef789`
 - **GOWA acuan**: `3744c92a24fa0806c68df9bf6a34db4340016e10` (snapshot di `docs/upstream/`)
@@ -44,7 +44,7 @@
    Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
    `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
    `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
-2. Fase 3 lanjutan: sisa `/user/*` (termasuk `/user/my/groups` → `client.groups().list_participating()`), sticker/poll/
+2. Fase 3 lanjutan: sisa `/user/*` (avatar, pushname, my/privacy, my/newsletters, my/contacts[/detailed], business-profile, presence/subscribe), sticker/poll/
    presence, event grup/label/call (`group.participants|info|joined` dari `GroupUpdate`), auto reply/mark read/reject call.
 
 ## Keputusan yang sudah diambil
@@ -83,6 +83,7 @@
 | 2026-11-23 | `/group/participants/{add,remove,promote,demote}`: error per peserta selain 403+`add_request` dilaporkan `status:"error"` (`Action failed (code N)`) | GOWA melaporkan semua itu `success` (menyesatkan); kasus 403 tetap persis GOWA |
 | 2026-11-23 | `/group/*` memakai `Body`/`Payload` (gagal bind → 500) dan `GET` list peserta/request/export menolak `group_id` kosong dengan 400 `INVALID_GROUP_ID` sebelum cek login | perilaku handler GOWA `ui/rest/group.go` |
 | 2026-11-23 | Peserta di body (`participants`) selalu ditempeli `@s.whatsapp.net` dan dicek `is_on_whatsapp` tanpa memedulikan `WHATSAPP_ACCOUNT_VALIDATION`; tak terdaftar → 400 `INVALID_JID` `user is not registered` | GOWA `participantToJID` |
+| 2026-11-24 | `/user/my/groups` = `list_participating` (id) + `fetch_metadata_batch` (chunk 200) → `GroupInfo` lengkap, 2 IQ berapa pun jumlah grup; tanpa grup → `data: null` | whatsmeow `GetJoinedGroups` mengembalikan peserta penuh; `list_participating` SDK hanya overview tanpa peserta, per-grup `fetch_metadata` = N IQ (risiko rate limit) |
 | 2026-11-23 | Foto grup: validasi (tipe/ukuran ≤10MB/format) → 400 `INVALID_IMAGE_FORMAT`; diproses crop persegi tengah, ≤640px, JPEG q80; tanpa file `photo` = hapus foto | GOWA `ValidateGroupPhotoFormat` + `ProcessGroupPhoto` |
 
 ## Catatan / jebakan
@@ -121,6 +122,7 @@
     versi whatsmeow acuan GOWA lebih baru dari yang bisa diverifikasi → bandingkan dengan output GOWA asli bila ada konsumen yang bergantung.
     `DefaultMembershipApprovalMode`/`AnnounceVersionID` selalu kosong (whatsapp-rust tidak mengeksposnya).
   - `/group/participants|participant-requests`: `display_name` hanya dari tabel `contacts` (GOWA juga memakai verified name dari usync).
+  - `/user/my/groups`: grup yang daftar pesertanya dipotong server (`Truncated`) keluar dengan `Participants: []` + `ParticipantCount` benar dan field lain kosong; grup `Forbidden`/`NotFound` di antara dua IQ dilewati. `ParticipantCount` kini juga ada di `/group/info` (struct Go sama). `truncated_group_json` belum punya unit test (`GroupOverview` `non_exhaustive`, tak bisa dibangun di luar SDK).
   - `/group/info-from-link`: `participant_count` = jumlah peserta di respons (atau atribut `size` bila daftar kosong).
   - `/group/join-with-link` pada grup yang butuh persetujuan tetap mengembalikan `group_id` (GOWA/whatsmeow sama), tanpa penanda "pending".
   - `/group/topic` memakai `PreviousDescription::Resolve` (satu IQ tambahan untuk membaca id deskripsi sebelumnya).
@@ -135,6 +137,10 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — Fase 3: `/user/my/groups`
+- `usecase/group.rs`: `my_groups` (list_participating → fetch_metadata_batch per 200 id), `group_info_values` (dipakai bersama `info`: resolve LID→PN lalu satu query kontak untuk semua grup), `truncated_group_json`; `ParticipantCount` ditambah ke JSON `GroupInfo`. Route di `http/routes/user.rs`.
+- Test: `user_my_groups_requires_login`; unit test `group_info` memeriksa `ParticipantCount`. Belum diuji dengan akun live.
 
 ### 2026-11-23 — Fase 3: `/group/*`
 - `usecase/group.rs` + `http/routes/group.rs`: 19 route (create, join-with-link, info-from-link, info, leave, participants

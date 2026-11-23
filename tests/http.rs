@@ -591,6 +591,14 @@ async fn user_endpoints_require_login() {
 }
 
 #[tokio::test]
+async fn user_my_groups_requires_login() {
+    let h = harness().await;
+    let (status, body) = call(&h.app, get("/user/my/groups")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "AUTHENTICATION_ERROR");
+}
+
+#[tokio::test]
 async fn dashboard_falls_back_when_not_downloaded() {
     let h = harness().await;
     let (status, body) = raw(&h.app, get("/")).await;

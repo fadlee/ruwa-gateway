@@ -17,13 +17,16 @@ use crate::{
     wa::{
         Jid, jid,
         sdk::{
-            GroupCreateOptions, GroupDescription, GroupMetadata, GroupParticipantOptions,
-            GroupSubject, JoinGroupResult, PreviousDescription, prelude::Client,
+            GroupCreateOptions, GroupDescription, GroupHierarchy, GroupLookupResult, GroupMetadata,
+            GroupOverview, GroupParticipantOptions, GroupSubject, JoinGroupResult,
+            PreviousDescription, SubgroupKind, prelude::Client,
         },
     },
 };
 
 const MAX_NAME_CHARS: usize = 25;
+/// Groups per batch metadata IQ (well under the SDK's 10,000 cap).
+const BATCH_LIMIT: usize = 200;
 
 /// Fiber binds `locked=true` from JSON and `locked=1|t|true` from forms.
 fn lenient_bool<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
@@ -772,6 +775,7 @@ fn group_info_json(
         "CreatorCountryCode": meta.creator_country_code.clone().unwrap_or_default(),
         "ParticipantVersionID": meta.participant_version_id.clone().unwrap_or_default(),
         "Participants": participants,
+        "ParticipantCount": meta.participants.len(),
         "MemberAddMode": meta.member_add_mode.map(|m| m.as_str()).unwrap_or_default(),
     })
 }
@@ -789,13 +793,104 @@ pub async fn info(
         .fetch_metadata(&group)
         .await
         .map_err(ApiError::internal)?;
-    let mut phones = Vec::with_capacity(meta.participants.len());
-    for p in &meta.participants {
-        phones.push(phone_jid(&client, &p.jid, p.phone_number.as_ref()).await);
+    Ok(group_info_values(device, &client, &[meta]).await.remove(0))
+}
+
+/// Full `GroupInfo` JSON for several groups: LID→phone lookups per participant,
+/// then one contact-book query for every phone across all groups.
+async fn group_info_values(
+    device: &DeviceInstance,
+    client: &Client,
+    metas: &[GroupMetadata],
+) -> Vec<Value> {
+    let mut phones: Vec<Vec<Option<Jid>>> = Vec::with_capacity(metas.len());
+    for meta in metas {
+        let mut row = Vec::with_capacity(meta.participants.len());
+        for p in &meta.participants {
+            row.push(phone_jid(client, &p.jid, p.phone_number.as_ref()).await);
+        }
+        phones.push(row);
     }
-    let lookups = phones.iter().flatten().map(|j| j.to_string()).collect();
+    let lookups = phones
+        .iter()
+        .flatten()
+        .flatten()
+        .map(|j| j.to_string())
+        .collect();
     let names = contact_names(device, lookups).await;
-    Ok(group_info_json(&meta, &phones, &names))
+    metas
+        .iter()
+        .zip(&phones)
+        .map(|(meta, phones)| group_info_json(meta, phones, &names))
+        .collect()
+}
+
+/// Overview-only `GroupInfo` for a group whose participant list the server
+/// truncated: identity, hierarchy and size are real, the rest is zero-valued.
+fn truncated_group_json(o: &GroupOverview, count: u32) -> Value {
+    let (is_parent, linked_parent, default_sub) = match &o.hierarchy {
+        GroupHierarchy::Community => (true, String::new(), false),
+        GroupHierarchy::Subgroup { parent, kind } => (
+            false,
+            parent.to_string(),
+            matches!(kind, SubgroupKind::Announcement),
+        ),
+        _ => (false, String::new(), false),
+    };
+    json!({
+        "JID": o.id.to_string(),
+        "Name": o.subject.clone().unwrap_or_default(),
+        "ParticipantCount": count,
+        "Participants": [],
+        "IsParent": is_parent,
+        "LinkedParentJID": linked_parent,
+        "IsDefaultSubGroup": default_sub,
+    })
+}
+
+/// `GET /user/my/groups` (GOWA `MyListGroups`, whatsmeow `GetJoinedGroups`):
+/// every joined group as full `GroupInfo`. whatsapp-rust lists ids first
+/// (`participating` overview) and then batch-fetches metadata, so the cost is
+/// two IQs regardless of group count. Groups whose participant list the server
+/// truncated keep an empty `Participants` and a real `ParticipantCount`.
+pub async fn my_groups(device: &DeviceInstance) -> ApiResult<Value> {
+    let client = must_login(device)?;
+    let overviews = client
+        .groups()
+        .list_participating()
+        .await
+        .map_err(ApiError::internal)?;
+    let ids: Vec<Jid> = overviews.iter().map(|o| o.id.clone()).collect();
+    let mut found: Vec<GroupMetadata> = Vec::new();
+    let mut truncated: HashMap<String, u32> = HashMap::new();
+    for chunk in ids.chunks(BATCH_LIMIT) {
+        let results = client
+            .groups()
+            .fetch_metadata_batch(chunk)
+            .await
+            .map_err(ApiError::internal)?;
+        for r in results {
+            match r {
+                GroupLookupResult::Found(meta) => found.push(*meta),
+                GroupLookupResult::Truncated {
+                    id,
+                    participant_count,
+                } => {
+                    truncated.insert(id.to_string(), participant_count);
+                }
+                // Left or hidden between the two calls: whatsmeow skips these too.
+                _ => {}
+            }
+        }
+    }
+    let mut data = group_info_values(device, &client, &found).await;
+    for o in &overviews {
+        if let Some(count) = truncated.get(&o.id.to_string()) {
+            data.push(truncated_group_json(o, *count));
+        }
+    }
+    // Go marshals a nil slice as `null`.
+    Ok(json!({ "data": if data.is_empty() { Value::Null } else { Value::Array(data) } }))
 }
 
 #[cfg(test)]
@@ -846,5 +941,6 @@ mod tests {
         assert_eq!(v["IsLocked"], true);
         assert_eq!(v["GroupCreated"], "0001-01-01T00:00:00Z");
         assert_eq!(v["Participants"], json!([]));
+        assert_eq!(v["ParticipantCount"], 0);
     }
 }

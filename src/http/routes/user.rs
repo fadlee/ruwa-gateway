@@ -11,13 +11,14 @@ use serde::Deserialize;
 use crate::{
     error::ApiResult,
     http::{AppState, device_scope::Device, response},
-    usecase::user,
+    usecase::{group, user},
 };
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/user/check", get(check))
         .route("/user/info", get(info))
+        .route("/user/my/groups", get(my_groups))
 }
 
 #[derive(Deserialize)]
@@ -41,4 +42,9 @@ async fn info(
 ) -> ApiResult<Response> {
     let res = user::info(&device, &q.phone, state.settings.account_validation).await?;
     Ok(response::success("Success get user info", res))
+}
+
+async fn my_groups(Extension(Device(device)): Extension<Device>) -> ApiResult<Response> {
+    let res = group::my_groups(&device).await?;
+    Ok(response::success("Success get list groups", res))
 }

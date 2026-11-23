@@ -21,6 +21,10 @@ pub fn router() -> Router<AppState> {
         .route("/newsletter/unfollow", post(unfollow))
         .route("/newsletter/info", get(info))
         .route("/newsletter/messages", get(messages))
+        .route(
+            "/newsletter/live-updates",
+            get(live_list).post(live_subscribe).delete(live_unsubscribe),
+        )
         .route("/newsletter/messages/{server_id}/download", get(download))
 }
 
@@ -86,4 +90,33 @@ async fn download(
         res.file_url = format!("http://{host}{}{path}", state.settings.base_path);
     }
     Ok(response::success(res.status.clone(), res))
+}
+
+async fn live_list(Extension(Device(device)): Extension<Device>) -> ApiResult<Response> {
+    Ok(response::success(
+        "Success list newsletter live updates",
+        newsletter::live_updates_list(&device),
+    ))
+}
+
+async fn live_subscribe(
+    Extension(Device(device)): Extension<Device>,
+    Body(req): Body<IdRequest>,
+) -> ApiResult<Response> {
+    let res = newsletter::live_updates_subscribe(&device, req).await?;
+    Ok(response::success(
+        "Success subscribe newsletter live updates",
+        res,
+    ))
+}
+
+async fn live_unsubscribe(
+    Extension(Device(device)): Extension<Device>,
+    Query(q): Query<IdRequest>,
+) -> ApiResult<Response> {
+    newsletter::live_updates_unsubscribe(&device, &q.newsletter_id)?;
+    Ok(response::success(
+        "Success unsubscribe newsletter live updates",
+        serde_json::Value::Null,
+    ))
 }

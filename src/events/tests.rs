@@ -802,3 +802,30 @@ fn device_reachout_timelock() {
         json!({"is_active": false, "enforcement_type": "BIZ"})
     );
 }
+
+#[test]
+fn newsletter_message_event() {
+    let actual = newsletter_message_envelope(
+        &jid("120363123456789@newsletter"),
+        &[LiveMessageView {
+            server_id: 123,
+            forwards_count: 42,
+            reactions: vec![("👍".into(), 50), ("❤️".into(), 25)],
+        }],
+        "628123456789@s.whatsapp.net",
+        secs("2026-01-18T12:00:00Z"),
+    );
+    assert_matches_doc(&Value::Object(actual), &doc_example("Newsletter Message"));
+
+    // Counters of zero and no reactions are omitted.
+    let bare = newsletter_message_envelope(
+        &jid("1@newsletter"),
+        &[LiveMessageView {
+            server_id: 7,
+            ..Default::default()
+        }],
+        "",
+        0,
+    );
+    assert_eq!(bare["payload"]["messages"], json!([{"server_id": 7}]));
+}

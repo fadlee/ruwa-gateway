@@ -447,6 +447,7 @@ pub const DEVICE_TEMPORARY_BAN: &str = "device.temporary_ban";
 pub const DEVICE_REACHOUT_TIMELOCK: &str = "device.reachout_timelock";
 pub const LABEL_EDIT: &str = "label.edit";
 pub const LABEL_ASSOCIATION: &str = "label.association";
+pub const NEWSLETTER_MESSAGE: &str = "newsletter.message";
 pub const MESSAGE_DELETED: &str = "message.deleted";
 pub const PRESENCE: &str = "presence";
 pub const CALL_OFFER: &str = "call.offer";
@@ -699,6 +700,45 @@ pub fn device_envelope(
         env.insert("device_id".into(), jid.into());
     }
     env
+}
+
+/// One message entry of a newsletter live update.
+#[derive(Debug, Clone, Default)]
+pub struct LiveMessageView {
+    pub server_id: u64,
+    pub forwards_count: u64,
+    pub reactions: Vec<(String, u64)>,
+}
+
+/// `newsletter.message` (GOWA `newsletterLiveUpdateBody`): live updates carry
+/// counters only, so zero counts and empty reactions are left out.
+pub fn newsletter_message_envelope(
+    newsletter: &Jid,
+    messages: &[LiveMessageView],
+    device_id: &str,
+    ts: i64,
+) -> Map<String, Value> {
+    let rows: Vec<Value> = messages
+        .iter()
+        .map(|m| {
+            let mut v = Map::new();
+            v.insert("server_id".into(), m.server_id.into());
+            if m.forwards_count > 0 {
+                v.insert("forwards_count".into(), m.forwards_count.into());
+            }
+            if !m.reactions.is_empty() {
+                let counts: Map<String, Value> = m
+                    .reactions
+                    .iter()
+                    .map(|(code, n)| (code.clone(), (*n).into()))
+                    .collect();
+                v.insert("reaction_counts".into(), Value::Object(counts));
+            }
+            Value::Object(v)
+        })
+        .collect();
+    let payload = json!({ "newsletter_id": newsletter.to_string(), "messages": rows });
+    group_envelope(NEWSLETTER_MESSAGE, device_id, ts, payload)
 }
 
 /// Fields of a label edit; only those WhatsApp sent are emitted.

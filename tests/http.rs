@@ -1608,3 +1608,50 @@ async fn newsletter_contract() {
         assert_eq!(body["code"], "AUTHENTICATION_ERROR", "{path}");
     }
 }
+
+#[tokio::test]
+async fn newsletter_live_updates_contract() {
+    let h = harness().await;
+    let (status, body) = call(&h.app, get("/newsletter/live-updates")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["message"], "Success list newsletter live updates");
+    assert_eq!(body["results"]["data"], serde_json::json!([]));
+
+    expect_validation(
+        &h,
+        post_json("/newsletter/live-updates", "{}"),
+        "newsletter_id: cannot be blank.",
+    )
+    .await;
+    let (status, body) = call(
+        &h.app,
+        post_json(
+            "/newsletter/live-updates",
+            r#"{"newsletter_id":"1@newsletter"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "AUTHENTICATION_ERROR");
+
+    let delete = |uri: &str| {
+        axum::http::Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    };
+    let (status, body) = call(&h.app, delete("/newsletter/live-updates")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["message"], "newsletter_id: cannot be blank.");
+    let (status, body) = call(
+        &h.app,
+        delete("/newsletter/live-updates?newsletter_id=1@newsletter"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["message"],
+        "newsletter_id: no live updates subscription for 1@newsletter."
+    );
+}

@@ -68,7 +68,8 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 ## Fase 4 — M4: newsletter, scheduler, UI
 
 - [x] `/newsletter/follow|unfollow|info|messages|messages/{id}/download`
-- [ ] `/newsletter/message-updates|directory|live-updates` + event `newsletter.joined|left|message|mute`
+- [x] `/newsletter/live-updates` (GET/POST/DELETE, renew otomatis) + event `newsletter.message`
+- [ ] `/newsletter/message-updates|directory` + event `newsletter.joined|left|mute` (SDK tak mengeluarkan event-nya)
 - [ ] Scheduler persisten (`scheduled_sends`), `/send/schedules*`, retry dengan message id sama
 - [x] serve gowa-ui (download release + verifikasi SHA-256) — dikerjakan lebih awal untuk uji manual
 - [x] `/ws` hub

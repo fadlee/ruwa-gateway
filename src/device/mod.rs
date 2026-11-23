@@ -12,6 +12,7 @@ mod backfill;
 pub mod hub;
 mod ingest;
 mod instance;
+pub mod live_updates;
 pub mod presence;
 mod processor;
 

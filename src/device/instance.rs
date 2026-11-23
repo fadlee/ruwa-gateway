@@ -67,6 +67,8 @@ pub struct DeviceInstance {
     pub(super) seen_groups: StdMutex<HashSet<String>>,
     /// Server verdicts for recently sent messages.
     pub acks: super::acks::AckBook,
+    /// Newsletter live-updates subscriptions (in memory).
+    pub live_updates: super::live_updates::LiveUpdates,
 }
 
 impl DeviceInstance {
@@ -95,6 +97,7 @@ impl DeviceInstance {
             contacts_resyncing: AtomicBool::new(false),
             seen_groups: StdMutex::new(HashSet::new()),
             acks: Default::default(),
+            live_updates: Default::default(),
         }
     }
 
@@ -236,6 +239,7 @@ impl DeviceInstance {
     /// Stop the bot and delete the session, keeping the slot (GOWA
     /// `LogoutDeviceKeepSlot`).
     pub async fn wipe_session(&self) {
+        self.live_updates.stop_all();
         self.stop().await;
         remove_session_files(&self.dir.join(SESSION_DB));
         super::backfill::clear_contacts_marker(&self.dir);

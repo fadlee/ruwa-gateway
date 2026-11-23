@@ -309,6 +309,53 @@ pub async fn download_media(
     })
 }
 
+fn status_value(s: &crate::device::live_updates::Status) -> Value {
+    let mut v = json!({
+        "newsletter_id": s.newsletter,
+        "duration_seconds": s.duration_secs,
+        "expires_at": crate::events::rfc3339(s.expires_at),
+        "renewed_at": crate::events::rfc3339(s.renewed_at),
+    });
+    if !s.last_error.is_empty() {
+        v["last_error"] = s.last_error.clone().into();
+    }
+    v
+}
+
+/// `GET /newsletter/live-updates`: always an array, sorted by channel.
+pub fn live_updates_list(device: &DeviceInstance) -> Value {
+    json!({ "data": device.live_updates.list().iter().map(status_value).collect::<Vec<_>>() })
+}
+
+/// `POST /newsletter/live-updates`.
+pub async fn live_updates_subscribe(
+    device: &std::sync::Arc<DeviceInstance>,
+    req: IdRequest,
+) -> ApiResult<Value> {
+    super::chat::ozzo(id_errors(&req.newsletter_id, true))?;
+    let (_, jid) = target(device, &req.newsletter_id)?;
+    let status = device
+        .live_updates
+        .subscribe(device, jid)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(status_value(&status))
+}
+
+/// `DELETE /newsletter/live-updates?newsletter_id=…`.
+pub fn live_updates_unsubscribe(device: &DeviceInstance, id: &str) -> ApiResult<()> {
+    super::chat::ozzo(id_errors(id, true))?;
+    let jid =
+        jid::parse_jid(id).map_err(|_| ApiError::validation("newsletter_id: invalid JID."))?;
+    if device.live_updates.unsubscribe(&jid) {
+        Ok(())
+    } else {
+        Err(ApiError::validation(format!(
+            "newsletter_id: no live updates subscription for {jid}."
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

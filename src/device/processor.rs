@@ -67,6 +67,7 @@ const KINDS: &[EventKind] = &[
     EventKind::LabelAssociationUpdate,
     EventKind::ReachoutTimelockUpdate,
     EventKind::ServerAck,
+    EventKind::NewsletterLiveUpdate,
 ];
 
 impl EventHandler for Relay {
@@ -152,6 +153,7 @@ async fn handle(
             tracing::warn!(device = %device.id(), error = %e.error, "pairing failed");
         }
         Event::Connected(_) => {
+            device.live_updates.renew_all();
             super::presence::send_on_connect(device, &media.presence_on_connect).await;
             if let Some(pn) = device.client().and_then(|c| c.pn()) {
                 let jid = pn.to_non_ad().to_string();
@@ -463,6 +465,29 @@ async fn handle(
             .await;
             add_session_id(device, &mut env);
             webhook.send(events::LABEL_ASSOCIATION, env, &device.webhook());
+        }
+        Event::NewsletterLiveUpdate(update) => {
+            let rows: Vec<events::LiveMessageView> = update
+                .messages
+                .iter()
+                .map(|m| events::LiveMessageView {
+                    server_id: m.server_id,
+                    forwards_count: m.forwards_count.unwrap_or(0),
+                    reactions: m
+                        .reactions
+                        .iter()
+                        .map(|r| (r.code.clone(), r.count))
+                        .collect(),
+                })
+                .collect();
+            let mut env = events::newsletter_message_envelope(
+                &update.newsletter_jid,
+                &rows,
+                &device.jid().unwrap_or_default(),
+                super::now(),
+            );
+            add_session_id(device, &mut env);
+            webhook.send(events::NEWSLETTER_MESSAGE, env, &device.webhook());
         }
         Event::ServerAck(ack) => {
             // Only a sent message's verdict matters (see `device::acks`).

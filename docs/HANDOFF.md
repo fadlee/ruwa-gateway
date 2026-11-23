@@ -6,8 +6,8 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*` selesai; berikutnya `/group/*`.
-- **Build**: `cargo test` (125 test: 93 unit + 32 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*` selesai; berikutnya sisa `/user/*` (`/user/my/groups` dst.), sticker/poll/presence, event grup.
+- **Build**: `cargo test` (135 test: 100 unit + 35 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -16,7 +16,8 @@
   auto-download, `/user/*`, logout dari HP (`device.logged_out`), temp ban, **chat storage** (history sync setelah
   pair, pesan masuk/keluar tersimpan, reply setelah restart), `/chat/{jid}/pin|archive|disappearing|history`
   (app-state/protocol ke WhatsApp), nama dari `ContactUpdate`, semua `/message/{id}/*` (revoke/edit/reaction/read/
-  played/star/delete-for-me/forward/download). Cek via gowa-ui menu Chats atau `GET /chats`.
+  played/star/delete-for-me/forward/download), **semua `/group/*`** (butuh akun yang ada di grup; admin untuk
+  name/locked/announce/topic/photo/participants). Cek via gowa-ui menu Chats/Groups atau `GET /chats`.
 - **whatsapp-rust rev**: `94877bedb6cd473864f9f6b332a5c13d5fbef789`
 - **GOWA acuan**: `3744c92a24fa0806c68df9bf6a34db4340016e10` (snapshot di `docs/upstream/`)
 
@@ -25,7 +26,7 @@
 1. **Uji manual M1+M2 lewat gowa-ui** (paling mudah): `APP_HOST=127.0.0.1 cargo run -- rest` dari direktori kerja
    terpisah, buka `http://localhost:3000/` → kartu device → **Pair** → scan QR dari HP. Lalu menu **Messaging**
    untuk kirim teks/gambar/file/audio/video/kontak/lokasi/link, **Add device** untuk multi-device.
-   Halaman Chats/Groups/Channels/sebagian Account akan error (endpoint Fase 3–4). **User sudah berhasil pair 2 akun dan kirim pesan lewat UI (2026-11-23).**
+   Halaman Channels/sebagian Account akan error (endpoint Fase 3–4); Chats dan Groups kini tersedia. **User sudah berhasil pair 2 akun dan kirim pesan lewat UI (2026-11-23).**
    Alternatif lewat curl (butuh HP dengan akun test):
    ```sh
    # terminal 1: penerima webhook (atau https://webhook.site)
@@ -43,8 +44,8 @@
    Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
    `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
    `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
-2. Fase 3 lanjutan: `/group/*` (GOWA `usecase/group.go`, whatsapp-rust `client.groups()`), lalu sisa `/user/*`,
-   sticker/poll/presence, event grup/label/call, auto reply/mark read/reject call.
+2. Fase 3 lanjutan: sisa `/user/*` (termasuk `/user/my/groups` → `client.groups().list_participating()`), sticker/poll/
+   presence, event grup/label/call (`group.participants|info|joined` dari `GroupUpdate`), auto reply/mark read/reject call.
 
 ## Keputusan yang sudah diambil
 
@@ -79,6 +80,10 @@
 | 2026-11-23 | Timestamp response chat = RFC3339 UTC; unix 0 → `0001-01-01T00:00:00Z` | GOWA `formatTimestamp` (zero time); `APP_TIMEZONE` belum didukung |
 | 2026-11-23 | `/message/*/delete` & `star`: `from_me`/author diambil dari salinan tersimpan, heuristik GOWA (id > 22 char = bukan dari saya) hanya bila tidak tersimpan | heuristik GOWA salah untuk id pendek dari klien lain; index app-state mengikuti whatsapp-rust (WA Web) |
 | 2026-11-23 | Read/played receipt 1:1 tanpa `participant` | API whatsapp-rust (`sender` hanya untuk grup); whatsmeow juga mengabaikan sender di DM |
+| 2026-11-23 | `/group/participants/{add,remove,promote,demote}`: error per peserta selain 403+`add_request` dilaporkan `status:"error"` (`Action failed (code N)`) | GOWA melaporkan semua itu `success` (menyesatkan); kasus 403 tetap persis GOWA |
+| 2026-11-23 | `/group/*` memakai `Body`/`Payload` (gagal bind → 500) dan `GET` list peserta/request/export menolak `group_id` kosong dengan 400 `INVALID_GROUP_ID` sebelum cek login | perilaku handler GOWA `ui/rest/group.go` |
+| 2026-11-23 | Peserta di body (`participants`) selalu ditempeli `@s.whatsapp.net` dan dicek `is_on_whatsapp` tanpa memedulikan `WHATSAPP_ACCOUNT_VALIDATION`; tak terdaftar → 400 `INVALID_JID` `user is not registered` | GOWA `participantToJID` |
+| 2026-11-23 | Foto grup: validasi (tipe/ukuran ≤10MB/format) → 400 `INVALID_IMAGE_FORMAT`; diproses crop persegi tengah, ≤640px, JPEG q80; tanpa file `photo` = hapus foto | GOWA `ValidateGroupPhotoFormat` + `ProcessGroupPhoto` |
 
 ## Catatan / jebakan
 
@@ -112,6 +117,13 @@
   - `/user/info`: `name` kosong (butuh chat storage); daftar device dari usync device list.
   - `chat_presence`: WhatsApp hanya mengirim typing bila akun "online"; GOWA punya presence pulse
     (`presence-pulse-*`) yang belum diport → event typing mungkin jarang/tidak muncul.
+  - `/group/info`: JSON meniru `whatsmeow types.GroupInfo` dari ingatan (nama field Go: `JID`, `Name`, `Topic`, `Participants`, ...);
+    versi whatsmeow acuan GOWA lebih baru dari yang bisa diverifikasi → bandingkan dengan output GOWA asli bila ada konsumen yang bergantung.
+    `DefaultMembershipApprovalMode`/`AnnounceVersionID` selalu kosong (whatsapp-rust tidak mengeksposnya).
+  - `/group/participants|participant-requests`: `display_name` hanya dari tabel `contacts` (GOWA juga memakai verified name dari usync).
+  - `/group/info-from-link`: `participant_count` = jumlah peserta di respons (atau atribut `size` bila daftar kosong).
+  - `/group/join-with-link` pada grup yang butuh persetujuan tetap mengembalikan `group_id` (GOWA/whatsmeow sama), tanpa penanda "pending".
+  - `/group/topic` memakai `PreviousDescription::Resolve` (satu IQ tambahan untuk membaca id deskripsi sebelumnya).
   - Belum ada: `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`, `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`, batas ukuran
     via env (`WHATSAPP_SETTING_MAX_*`); konstanta default GOWA dipakai.
 - Header signature webhook GOWA: `X-Hub-Signature-256: sha256=<hex>`; body JSON key tersortir (Go map).
@@ -123,6 +135,15 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-23 — Fase 3: `/group/*`
+- `usecase/group.rs` + `http/routes/group.rs`: 19 route (create, join-with-link, info-from-link, info, leave, participants
+  + export CSV, add/remove/promote/demote, participant-requests + approve/reject, photo, name, locked, announce, topic,
+  invite-link). Validasi gaya ozzo (`participants: (1: cannot be blank.).`, `name: the length must be between 1 and 25.`).
+- `media/image.rs`: `validate_group_photo` dan `group_photo` (crop persegi, 640px, JPEG q80). CSV export meniru
+  `spreadsheetSafeCell` + quoting `encoding/csv`. `usecase::chat::{ozzo, required}` dibuka `pub(crate)`.
+- Test: `group_validation_then_login`, `group_listing_endpoints_reject_empty_id_before_login`, `group_photo_validation`,
+  plus unit test (CSV, sel formula, bool form, foto, bentuk JSON `GroupInfo`). Belum diuji dengan akun live.
 
 ### 2026-11-23 — Fase 3: `/message/{id}/*`
 - `usecase/message.rs` + `http/routes/message.rs`: reaction (key ala `BuildMessageKey`), revoke (sender/admin dari salinan

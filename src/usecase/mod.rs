@@ -4,6 +4,7 @@
 pub mod app;
 pub mod chat;
 pub mod device;
+pub mod group;
 pub mod message;
 pub mod names;
 pub mod send;

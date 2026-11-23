@@ -94,6 +94,77 @@ pub fn prepare(bytes: Vec<u8>, compress: bool, hd: bool) -> anyhow::Result<Prepa
     })
 }
 
+/// GOWA `MaxGroupPhotoDimension` / `GroupPhotoQuality`.
+const GROUP_PHOTO_EDGE: u32 = 640;
+const GROUP_PHOTO_QUALITY: u8 = 80;
+/// GOWA `ValidateGroupPhotoFormat` input cap.
+const GROUP_PHOTO_MAX_INPUT: usize = 10 * 1024 * 1024;
+
+/// GOWA `ValidateGroupPhotoFormat`: declared type, size, and sniffed format.
+/// The error text is what GOWA puts after `Image validation failed: `.
+pub fn validate_group_photo(content_type: &str, bytes: &[u8]) -> Result<(), String> {
+    if !content_type.is_empty()
+        && !matches!(
+            content_type,
+            "image/jpeg" | "image/jpg" | "image/png" | "image/webp"
+        )
+    {
+        return Err(format!(
+            "unsupported image format: {content_type} (supported: JPEG, PNG, WebP)"
+        ));
+    }
+    if bytes.len() > GROUP_PHOTO_MAX_INPUT {
+        return Err(format!(
+            "image file too large: {} bytes (max 10MB for processing)",
+            bytes.len()
+        ));
+    }
+    let reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("invalid image file: {e}"))?;
+    let format = reader
+        .format()
+        .ok_or_else(|| "invalid image file: image: unknown format".to_owned())?;
+    let (w, h) = reader
+        .into_dimensions()
+        .map_err(|e| format!("invalid image file: {e}"))?;
+    if u64::from(w) * u64::from(h) > MAX_PIXELS {
+        return Err(format!("invalid image file: image too large: {w}x{h}"));
+    }
+    if !matches!(
+        format,
+        ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP
+    ) {
+        return Err(format!(
+            "unsupported image format detected: {}",
+            format
+                .extensions_str()
+                .first()
+                .copied()
+                .unwrap_or("unknown")
+        ));
+    }
+    Ok(())
+}
+
+/// GOWA `ProcessGroupPhoto`: centre-crop to a square, shrink to 640px,
+/// re-encode as JPEG (quality 80).
+pub fn group_photo(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let (img, _) = decode(bytes)?;
+    let (w, h) = img.dimensions();
+    let side = w.min(h);
+    let square = img.crop_imm((w - side) / 2, (h - side) / 2, side, side);
+    let square = if side > GROUP_PHOTO_EDGE {
+        square.resize_exact(GROUP_PHOTO_EDGE, GROUP_PHOTO_EDGE, FilterType::Lanczos3)
+    } else {
+        square
+    };
+    let mut out = Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, GROUP_PHOTO_QUALITY)
+        .encode_image(&DynamicImage::ImageRgb8(square.to_rgb8()))?;
+    Ok(out.into_inner())
+}
+
 /// Best-effort JPEG thumbnail of arbitrary image bytes (documents, links).
 pub fn thumbnail_of(bytes: &[u8]) -> Option<Vec<u8>> {
     decode(bytes).ok().and_then(|(img, _)| thumbnail(&img).ok())
@@ -131,6 +202,40 @@ mod tests {
         let p = prepare(png.clone(), false, false).unwrap();
         assert_eq!(p.bytes, png);
         assert_eq!((p.width, p.height), (50, 40));
+    }
+
+    #[test]
+    fn group_photo_is_a_capped_square_jpeg() {
+        let jpeg = group_photo(&sample_png(1600, 900)).unwrap();
+        let img = image::load_from_memory(&jpeg).unwrap();
+        assert_eq!((img.width(), img.height()), (640, 640));
+        assert_eq!(
+            image::guess_format(&jpeg).unwrap(),
+            image::ImageFormat::Jpeg
+        );
+        let small = image::load_from_memory(&group_photo(&sample_png(100, 60)).unwrap()).unwrap();
+        assert_eq!((small.width(), small.height()), (60, 60));
+    }
+
+    #[test]
+    fn group_photo_validation_messages() {
+        let png = sample_png(8, 8);
+        assert!(validate_group_photo("image/png", &png).is_ok());
+        assert!(validate_group_photo("", &png).is_ok());
+        assert_eq!(
+            validate_group_photo("image/gif", &png).unwrap_err(),
+            "unsupported image format: image/gif (supported: JPEG, PNG, WebP)"
+        );
+        assert!(
+            validate_group_photo("image/png", b"nope")
+                .unwrap_err()
+                .starts_with("invalid image file")
+        );
+        let big = vec![0u8; 10 * 1024 * 1024 + 1];
+        assert_eq!(
+            validate_group_photo("image/png", &big).unwrap_err(),
+            "image file too large: 10485761 bytes (max 10MB for processing)"
+        );
     }
 
     #[test]

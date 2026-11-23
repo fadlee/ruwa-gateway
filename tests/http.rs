@@ -1059,3 +1059,213 @@ async fn message_forward_checks_storage_first() {
     let (status, _) = call(&h.app, forward("M1", r#"{"phone":"628333"}"#)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+// ---- /group/* ----
+
+async fn expect_login(h: &Harness, req: Request<Body>) {
+    let (status, body) = call(&h.app, req).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["code"], "AUTHENTICATION_ERROR");
+}
+
+#[tokio::test]
+async fn group_validation_then_login() {
+    let h = harness().await;
+
+    // Create: both fields, then each participant, then login.
+    expect_validation(
+        &h,
+        post_json("/group", "{}"),
+        "participants: cannot be blank; title: cannot be blank.",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json("/group", r#"{"title":"T","participants":["62",""]}"#),
+        "participants: (1: cannot be blank.).",
+    )
+    .await;
+    expect_login(
+        &h,
+        post_json("/group", r#"{"title":"T","participants":["62"]}"#),
+    )
+    .await;
+
+    // Link based endpoints.
+    expect_validation(
+        &h,
+        post_json("/group/join-with-link", "{}"),
+        "link: cannot be blank.",
+    )
+    .await;
+    expect_validation(&h, get("/group/info-from-link"), "link: cannot be blank.").await;
+    expect_login(&h, get("/group/info-from-link?link=abc")).await;
+    expect_login(&h, post_json("/group/join-with-link", r#"{"link":"abc"}"#)).await;
+
+    // group_id required everywhere else.
+    expect_validation(&h, get("/group/info"), "group_id: cannot be blank.").await;
+    expect_validation(&h, get("/group/invite-link"), "group_id: cannot be blank.").await;
+    for path in ["leave", "locked", "announce", "topic"] {
+        expect_validation(
+            &h,
+            post_json(&format!("/group/{path}"), "{}"),
+            "group_id: cannot be blank.",
+        )
+        .await;
+        expect_login(
+            &h,
+            post_json(
+                &format!("/group/{path}"),
+                r#"{"group_id":"1203632782168851111"}"#,
+            ),
+        )
+        .await;
+    }
+    expect_login(&h, get("/group/info?group_id=1203632782168851111")).await;
+    expect_login(
+        &h,
+        get("/group/invite-link?group_id=1203632782168851111&reset=true"),
+    )
+    .await;
+
+    // Participant management.
+    for path in [
+        "participants",
+        "participants/remove",
+        "participants/promote",
+        "participants/demote",
+        "participant-requests/approve",
+        "participant-requests/reject",
+    ] {
+        expect_validation(
+            &h,
+            post_json(&format!("/group/{path}"), "{}"),
+            "group_id: cannot be blank; participants: cannot be blank.",
+        )
+        .await;
+        expect_login(
+            &h,
+            post_json(
+                &format!("/group/{path}"),
+                r#"{"group_id":"1203632782168851111","participants":["62811"]}"#,
+            ),
+        )
+        .await;
+    }
+
+    // Name: required and at most 25 characters.
+    expect_validation(
+        &h,
+        post_json("/group/name", r#"{"group_id":"1203632782168851111"}"#),
+        "name: cannot be blank.",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json(
+            "/group/name",
+            r#"{"group_id":"1203632782168851111","name":"abcdefghijklmnopqrstuvwxyz"}"#,
+        ),
+        "name: the length must be between 1 and 25.",
+    )
+    .await;
+    expect_login(
+        &h,
+        post_json(
+            "/group/name",
+            r#"{"group_id":"1203632782168851111","name":"Team"}"#,
+        ),
+    )
+    .await;
+
+    // Form bodies bind the same way (bool as 1/true).
+    let form = Request::post("/group/locked")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("group_id=1203632782168851111&locked=1"))
+        .unwrap();
+    expect_login(&h, form).await;
+
+    // A body that cannot be bound is a 500, as in GOWA.
+    let (status, _) = call(&h.app, post_json("/group/locked", "{")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn group_listing_endpoints_reject_empty_id_before_login() {
+    let h = harness().await;
+    for path in [
+        "/group/participants",
+        "/group/participants/export",
+        "/group/participant-requests",
+    ] {
+        let (status, body) = call(&h.app, get(path)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(body["code"], "INVALID_GROUP_ID");
+        assert_eq!(body["message"], "Group ID cannot be empty");
+        expect_login(&h, get(&format!("{path}?group_id=1203632782168851111"))).await;
+    }
+}
+
+#[tokio::test]
+async fn group_photo_validation() {
+    let h = harness().await;
+    let png = {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(8, 8)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    };
+    let group = ("group_id", "1203632782168851111");
+
+    let (status, body) = call(
+        &h.app,
+        multipart(
+            "/group/photo",
+            &[group],
+            Some(("photo", "a.gif", "image/gif", &png)),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "INVALID_IMAGE_FORMAT");
+    assert_eq!(
+        body["message"],
+        "Image validation failed: unsupported image format: image/gif (supported: JPEG, PNG, WebP)"
+    );
+    let (status, body) = call(
+        &h.app,
+        multipart(
+            "/group/photo",
+            &[group],
+            Some(("photo", "a.png", "image/png", b"nope")),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "INVALID_IMAGE_FORMAT");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Image validation failed: invalid image file")
+    );
+
+    // Valid photo and photo removal both reach the login check.
+    expect_login(
+        &h,
+        multipart(
+            "/group/photo",
+            &[group],
+            Some(("photo", "a.png", "image/png", &png)),
+        ),
+    )
+    .await;
+    expect_login(&h, multipart("/group/photo", &[group], None)).await;
+    expect_validation(
+        &h,
+        multipart("/group/photo", &[], None),
+        "group_id: cannot be blank.",
+    )
+    .await;
+}

@@ -28,7 +28,7 @@ pub fn format_ts(secs: i64) -> String {
 }
 
 /// ozzo-validation struct errors: `"a: msg; b: msg."`, keys sorted.
-fn ozzo(errors: BTreeMap<&str, String>) -> ApiResult<()> {
+pub(crate) fn ozzo(errors: BTreeMap<&str, String>) -> ApiResult<()> {
     if errors.is_empty() {
         return Ok(());
     }
@@ -54,7 +54,7 @@ fn range(
     }
 }
 
-fn required(errors: &mut BTreeMap<&'static str, String>, field: &'static str, v: &str) {
+pub(crate) fn required(errors: &mut BTreeMap<&'static str, String>, field: &'static str, v: &str) {
     if v.trim().is_empty() {
         errors.insert(field, "cannot be blank".into());
     }

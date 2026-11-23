@@ -11,7 +11,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{app::public_url, send::Body};
+use super::app::public_url;
+use crate::http::extract::Body;
 use crate::{
     error::{ApiError, ApiResult},
     http::{AppState, response},

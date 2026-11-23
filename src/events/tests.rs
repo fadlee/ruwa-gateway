@@ -23,7 +23,7 @@ fn doc_example(heading: &str) -> Value {
 }
 
 /// Fields GOWA always emits but some doc examples leave out.
-const ALWAYS_EMITTED: [&str; 1] = ["sender_display_name"];
+const ALWAYS_EMITTED: [&str; 2] = ["sender_display_name", "is_from_me"];
 
 fn assert_matches_doc(actual: &Value, expected: &Value) {
     let (Value::Object(a), Value::Object(e)) = (actual, expected) else {
@@ -48,6 +48,8 @@ fn assert_matches_doc(actual: &Value, expected: &Value) {
 struct FakeResolver {
     lids: HashMap<String, String>,
     display: String,
+    /// `Some(path)` enables auto-download and returns this path.
+    saved: Option<String>,
 }
 
 impl FakeResolver {
@@ -58,6 +60,7 @@ impl FakeResolver {
                 .map(|(l, p)| (l.to_string(), p.to_string()))
                 .collect(),
             display: "Saved Contact".into(),
+            saved: None,
         }
     }
 }
@@ -72,6 +75,251 @@ impl Resolver for FakeResolver {
     async fn display_name(&self, _: &Jid, _: bool, _: &str) -> String {
         self.display.clone()
     }
+
+    fn auto_download(&self) -> bool {
+        self.saved.is_some()
+    }
+
+    async fn save_media<'a>(&'a self, _: MediaRef<'a>) -> anyhow::Result<String> {
+        self.saved
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("disabled"))
+    }
+}
+
+fn saving(path: &str) -> FakeResolver {
+    FakeResolver {
+        saved: Some(path.into()),
+        ..FakeResolver::new(&[])
+    }
+}
+
+fn field<T>(set: impl FnOnce(&mut proto::Message, T), value: T) -> proto::Message {
+    let mut m = proto::Message::default();
+    set(&mut m, value);
+    m
+}
+
+use crate::wa::sdk::waproto::buffa::MessageField;
+
+fn image(caption: Option<&str>) -> proto::Message {
+    let mut i = proto::message::ImageMessage::default();
+    i.caption = caption.map(Into::into);
+    i.url = Some("https://mmg.whatsapp.net/...".into());
+    field(|m, v| m.image_message = MessageField::some(v), i)
+}
+
+/// Doc examples for media omit `sender_display_name`/`is_from_me`; our
+/// fixtures use the doc's sender and push name.
+fn media_msg(id: &str, ts: &str, message: proto::Message) -> IncomingMessage {
+    incoming(
+        id,
+        "628987654321@s.whatsapp.net",
+        "628123456789@s.whatsapp.net",
+        "John Doe",
+        ts,
+        message,
+    )
+}
+
+/// The n-th ```json block after a heading.
+fn doc_example_n(heading: &str, n: usize) -> Value {
+    let marker = format!("### {heading}\n");
+    let start = DOC
+        .find(&marker)
+        .unwrap_or_else(|| panic!("heading {heading:?} not in doc"));
+    let mut rest = &DOC[start..];
+    for _ in 0..n {
+        let open = rest.find("```json\n").unwrap() + 8;
+        rest = &rest[open..];
+        let close = rest.find("```").unwrap();
+        rest = &rest[close + 3..];
+    }
+    let open = rest.find("```json\n").unwrap() + 8;
+    let close = rest[open..].find("```").unwrap() + open;
+    serde_json::from_str(&rest[open..close]).unwrap()
+}
+
+#[tokio::test]
+async fn image_auto_download_without_caption() {
+    let r = saving("statics/media/1752404751-ad9e37ac-c658-4fe5-8d25-ba4a3f4d58fd.jpeg");
+    let m = media_msg("3EB0C127D7BACC83D6A3", "2025-07-13T11:05:51Z", image(None));
+    let actual = message_envelope(&r, &m, "628987654321@s.whatsapp.net").await;
+    assert_matches_doc(&actual, &doc_example_n("Image Message", 0));
+}
+
+#[tokio::test]
+async fn image_auto_download_with_caption() {
+    let r = saving("statics/media/1752404751-ad9e37ac-c658-4fe5-8d25-ba4a3f4d58fd.jpeg");
+    let m = media_msg(
+        "3EB0C127D7BACC83D6A3",
+        "2025-07-13T11:05:51Z",
+        image(Some("Check this out!")),
+    );
+    let actual = message_envelope(&r, &m, "628987654321@s.whatsapp.net").await;
+    assert_matches_doc(&actual, &doc_example_n("Image Message", 1));
+}
+
+#[tokio::test]
+async fn image_without_auto_download() {
+    let r = FakeResolver::new(&[]);
+    let m = media_msg(
+        "3EB0C127D7BACC83D6A3",
+        "2025-07-13T11:05:51Z",
+        image(Some("Check this out!")),
+    );
+    let actual = message_envelope(&r, &m, "628987654321@s.whatsapp.net").await;
+    assert_matches_doc(&actual, &doc_example_n("Image Message", 2));
+}
+
+#[tokio::test]
+async fn audio_and_sticker_are_plain_paths() {
+    let r = saving("statics/media/1752404905-b9393cd1-8546-4df9-8a60-ee3276036aba.ogg");
+    let a = field(
+        |m, v| m.audio_message = MessageField::some(v),
+        proto::message::AudioMessage::default(),
+    );
+    let m = media_msg("3EB0C127D7BACC83D6A5", "2023-10-15T10:55:00Z", a);
+    let actual = message_envelope(&r, &m, "628987654321@s.whatsapp.net").await;
+    assert_matches_doc(&actual, &doc_example("Audio Message"));
+
+    let r = saving("statics/media/1752404986-ff2464a6-c54c-4e6c-afde-c4c925ce3573.webp");
+    let st = field(
+        |m, v| m.sticker_message = MessageField::some(v),
+        proto::message::StickerMessage::default(),
+    );
+    let m = media_msg(
+        "446AC2BAF2061B53E24CA526DBDFBD4E",
+        "2025-07-13T11:09:45Z",
+        st,
+    );
+    let actual = message_envelope(&r, &m, "628987654321@s.whatsapp.net").await;
+    assert_matches_doc(&actual, &doc_example("Sticker Message"));
+}
+
+#[tokio::test]
+async fn document_both_modes() {
+    let mut d = proto::message::DocumentMessage::default();
+    d.caption = Some("Monthly report".into());
+    d.file_name = Some("report.pdf".into());
+    d.url = Some("https://mmg.whatsapp.net/...".into());
+    let msg = field(|m, v| m.document_message = MessageField::some(v), d);
+    let m = media_msg("3EB0C127D7BACC83D6A6", "2023-10-15T11:00:00Z", msg);
+
+    let actual = message_envelope(
+        &saving("statics/media/1752404965-document.pdf"),
+        &m,
+        "628987654321@s.whatsapp.net",
+    )
+    .await;
+    assert_matches_doc(&actual, &doc_example_n("Document Message", 0));
+    let actual = message_envelope(&FakeResolver::new(&[]), &m, "628987654321@s.whatsapp.net").await;
+    assert_matches_doc(&actual, &doc_example_n("Document Message", 1));
+}
+
+#[tokio::test]
+async fn contact_message() {
+    let mut c = proto::message::ContactMessage::default();
+    c.display_name = Some("3Care".into());
+    c.vcard = Some(
+        "BEGIN:VCARD\nVERSION:3.0\nN:;3Care;;;\nFN:3Care\nTEL;type=Mobile:+62 132\nEND:VCARD"
+            .into(),
+    );
+    let msg = field(|m, v| m.contact_message = MessageField::some(v), c);
+    let m = media_msg(
+        "56B3DFF4994284634E7AAFEEF6F1A0A2",
+        "2025-07-13T11:10:19Z",
+        msg,
+    );
+    let actual = message_envelope(&FakeResolver::new(&[]), &m, "628987654321@s.whatsapp.net").await;
+    assert_matches_doc(&actual, &doc_example("Contact Message"));
+}
+
+#[tokio::test]
+async fn location_message() {
+    let mut l = proto::message::LocationMessage::default();
+    l.degrees_latitude = Some(-6.2088);
+    l.degrees_longitude = Some(106.8456);
+    l.name = Some("Jakarta, Indonesia".into());
+    l.address = Some("Central Jakarta, DKI Jakarta, Indonesia".into());
+    let msg = field(|m, v| m.location_message = MessageField::some(v), l);
+    let m = media_msg("3EB0C127D7BACC83D6A9", "2023-10-15T11:15:00Z", msg);
+    let actual = message_envelope(&FakeResolver::new(&[]), &m, "628987654321@s.whatsapp.net").await;
+    assert_matches_doc(&actual, &doc_example("Location Message"));
+}
+
+async fn presence(
+    r: &FakeResolver,
+    chat: &str,
+    sender: &str,
+    group: bool,
+    state: &'static str,
+    media: &'static str,
+    ts: &str,
+) -> Value {
+    let view = ChatPresenceView {
+        chat: jid(chat),
+        sender: jid(sender),
+        is_group: group,
+        state,
+        media,
+    };
+    Value::Object(chat_presence_envelope(r, &view, "628123456789@s.whatsapp.net", secs(ts)).await)
+}
+
+#[tokio::test]
+async fn chat_presence_examples() {
+    let r = FakeResolver::new(&[("251556368777322", "628987654321")]);
+    let dm = "628987654321@s.whatsapp.net";
+    assert_matches_doc(
+        &presence(&r, dm, dm, false, "composing", "", "2026-01-22T12:00:00Z").await,
+        &doc_example("User Typing"),
+    );
+    assert_matches_doc(
+        &presence(&r, dm, dm, false, "paused", "", "2026-01-22T12:00:05Z").await,
+        &doc_example("User Stopped Typing"),
+    );
+    assert_matches_doc(
+        &presence(
+            &r,
+            dm,
+            dm,
+            false,
+            "composing",
+            "audio",
+            "2026-01-22T12:01:00Z",
+        )
+        .await,
+        &doc_example("User Recording Audio"),
+    );
+    let mut expected = doc_example("Group Typing");
+    expected["payload"]["chat_id"] = json!("120363402106@g.us");
+    assert_matches_doc(
+        &presence(
+            &r,
+            "120363402106@g.us",
+            "251556368777322@lid",
+            true,
+            "composing",
+            "",
+            "2026-01-22T12:02:00Z",
+        )
+        .await,
+        &expected,
+    );
+}
+
+#[test]
+fn device_temporary_ban() {
+    let now = secs("2026-10-28T09:00:00Z");
+    let actual = Value::Object(device_envelope(
+        DEVICE_TEMPORARY_BAN,
+        "org_2",
+        Some("628123456789@s.whatsapp.net"),
+        temporary_ban_payload(101, 86400, now),
+        now,
+    ));
+    assert_matches_doc(&actual, &doc_example("Device Temporary Ban"));
 }
 
 fn jid(s: &str) -> Jid {

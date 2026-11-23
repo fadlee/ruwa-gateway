@@ -45,7 +45,7 @@ pub struct SendResponse {
 }
 
 /// ozzo-validation style `Required` errors: `"a: cannot be blank; b: cannot be blank."`.
-fn required(fields: &[(&str, &str)]) -> ApiResult<()> {
+pub(crate) fn required(fields: &[(&str, &str)]) -> ApiResult<()> {
     let missing: BTreeMap<&str, &str> = fields
         .iter()
         .filter(|(_, v)| v.trim().is_empty())
@@ -63,7 +63,7 @@ fn required(fields: &[(&str, &str)]) -> ApiResult<()> {
 }
 
 /// GOWA `validatePhoneNumber`.
-fn validate_phone_number(phone: &str) -> ApiResult<()> {
+pub(crate) fn validate_phone_number(phone: &str) -> ApiResult<()> {
     let phone = phone.trim();
     let phone = phone.strip_prefix('+').unwrap_or(phone);
     if phone.is_empty() {
@@ -77,7 +77,7 @@ fn validate_phone_number(phone: &str) -> ApiResult<()> {
     Ok(())
 }
 
-fn validate_duration(duration: Option<i64>) -> ApiResult<()> {
+pub(crate) fn validate_duration(duration: Option<i64>) -> ApiResult<()> {
     match duration {
         Some(d) if !VALID_DURATIONS.contains(&d) => Err(ApiError::validation(
             "duration must be one of: 0 (no expiry), 86400 (24h), 604800 (7d), 7776000 (90d)",
@@ -86,7 +86,7 @@ fn validate_duration(duration: Option<i64>) -> ApiResult<()> {
     }
 }
 
-fn validate_allow_reshare(allow: bool, phone: &str) -> ApiResult<()> {
+pub(crate) fn validate_allow_reshare(allow: bool, phone: &str) -> ApiResult<()> {
     if allow && phone.trim() != "status@broadcast" {
         return Err(ApiError::validation(
             "allow_reshare is only supported when phone is status@broadcast",
@@ -95,7 +95,7 @@ fn validate_allow_reshare(allow: bool, phone: &str) -> ApiResult<()> {
     Ok(())
 }
 
-fn validate_mentions(mentions: &[String]) -> ApiResult<()> {
+pub(crate) fn validate_mentions(mentions: &[String]) -> ApiResult<()> {
     for mention in mentions.iter().filter(|m| *m != EVERYONE) {
         if validate_phone_number(mention).is_err() {
             return Err(ApiError::validation(format!(
@@ -116,7 +116,7 @@ pub fn validate_message(req: &MessageRequest) -> ApiResult<()> {
 }
 
 /// GOWA `MustLogin`.
-fn must_login(device: &DeviceInstance) -> ApiResult<Arc<Client>> {
+pub(crate) fn must_login(device: &DeviceInstance) -> ApiResult<Arc<Client>> {
     let client = device.client().ok_or_else(ApiError::not_connected)?;
     if !client.is_socket_connected() {
         return Err(ApiError::not_connected());
@@ -128,7 +128,11 @@ fn must_login(device: &DeviceInstance) -> ApiResult<Arc<Client>> {
 }
 
 /// GOWA `ValidateJidWithLogin` (minus `MustLogin`, done once per request).
-async fn resolve_recipient(client: &Client, raw: &str, account_validation: bool) -> ApiResult<Jid> {
+pub(crate) async fn resolve_recipient(
+    client: &Client,
+    raw: &str,
+    account_validation: bool,
+) -> ApiResult<Jid> {
     let parsed = parse_jid(raw).map_err(ApiError::internal)?;
     if parsed.is_lid() {
         if let Ok(Some(entry)) = client.get_lid_pn_entry(&parsed.to_non_ad()).await {
@@ -156,7 +160,7 @@ async fn resolve_recipient(client: &Client, raw: &str, account_validation: bool)
 }
 
 /// Text `@<digits>` mentions plus explicit ones (GOWA `resolveMentions`).
-async fn resolve_mentions(
+pub(crate) async fn resolve_mentions(
     client: &Client,
     text: &str,
     explicit: &[String],
@@ -195,7 +199,7 @@ async fn resolve_mentions(
 }
 
 /// GOWA `mergeReplyContext`: quote a known message; unknown ids are ignored.
-fn merge_reply(
+pub(crate) fn merge_reply(
     device: &DeviceInstance,
     ci: &mut proto::ContextInfo,
     reply_id: Option<&str>,
@@ -220,7 +224,7 @@ fn merge_reply(
 }
 
 /// Go `time.Time.String()` for a UTC instant.
-fn go_time_string(now: chrono::DateTime<chrono::Utc>) -> String {
+pub(crate) fn go_time_string(now: chrono::DateTime<chrono::Utc>) -> String {
     now.format("%Y-%m-%d %H:%M:%S +0000 UTC").to_string()
 }
 
@@ -257,32 +261,62 @@ pub async fn send_text(
     // TODO(Fase 4): status reshare flag for `allow_reshare` on status@broadcast.
 
     let message = msgx::extended_text(req.message.clone(), ci);
-    let sent = client
-        .send(SendRequest::new(&recipient, message))
-        .await
-        .map_err(send_error)?;
-    let message_id = sent.message_id.to_string();
-
-    device.remember(
-        message_id.clone(),
-        RecentMessage {
-            chat: recipient.to_non_ad().to_string(),
-            sender: device.jid().unwrap_or_default(),
-            text: req.message,
-        },
-    );
-
+    let message_id = deliver(device, &client, &recipient, message, &req.message).await?;
     Ok(SendResponse {
         status: format!(
             "Message sent to {} (server timestamp: {})",
             req.phone,
-            go_time_string(chrono::Utc::now())
+            server_time()
         ),
         message_id,
     })
 }
 
-fn send_error(error: SendError) -> ApiError {
+/// Send and remember the message (for replies). `text` is what GOWA stores
+/// as the message content (body, caption, or an emoji label for media).
+pub(crate) async fn deliver(
+    device: &DeviceInstance,
+    client: &Client,
+    recipient: &Jid,
+    message: proto::Message,
+    text: &str,
+) -> ApiResult<String> {
+    let sent = client
+        .send(SendRequest::new(recipient, message))
+        .await
+        .map_err(send_error)?;
+    let message_id = sent.message_id.to_string();
+    device.remember(
+        message_id.clone(),
+        RecentMessage {
+            chat: recipient.to_non_ad().to_string(),
+            sender: device.jid().unwrap_or_default(),
+            text: text.to_owned(),
+        },
+    );
+    Ok(message_id)
+}
+
+/// Stand-in for the server ack timestamp GOWA prints in `status`.
+pub(crate) fn server_time() -> String {
+    go_time_string(chrono::Utc::now())
+}
+
+/// Context shared by non-text sends: forwarded flag, and an expiration
+/// only when `duration > 0` (GOWA media/contact/location/link).
+pub(crate) fn base_context(is_forwarded: bool, duration: Option<i64>) -> proto::ContextInfo {
+    let mut ci = proto::ContextInfo::default();
+    if is_forwarded {
+        ci.is_forwarded = Some(true);
+        ci.forwarding_score = Some(100);
+    }
+    if let Some(d) = duration.filter(|d| *d > 0) {
+        ci.expiration = Some(d as u32);
+    }
+    ci
+}
+
+pub(crate) fn send_error(error: SendError) -> ApiError {
     match error {
         SendError::NotLoggedIn => ApiError::not_logged_in(),
         other => ApiError::internal(other),

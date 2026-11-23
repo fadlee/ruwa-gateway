@@ -39,6 +39,10 @@ pub struct DeviceOptions {
     pub qr_dir: PathBuf,
     /// Linked-device name shown on the phone (`APP_OS`).
     pub os: String,
+    /// Where incoming media is saved (`statics/media`).
+    pub media_dir: PathBuf,
+    /// `WHATSAPP_AUTO_DOWNLOAD_MEDIA`.
+    pub auto_download_media: bool,
 }
 
 pub struct DeviceManager {
@@ -83,6 +87,7 @@ impl DeviceManager {
     ) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(&opts.root)?;
         std::fs::create_dir_all(&opts.qr_dir)?;
+        std::fs::create_dir_all(&opts.media_dir)?;
 
         let (tx, rx) = mpsc::unbounded_channel();
         let manager = Arc::new(Self {
@@ -91,7 +96,14 @@ impl DeviceManager {
             devices: RwLock::new(BTreeMap::new()),
             events: tx,
         });
-        tokio::spawn(processor::run(rx, webhook));
+        tokio::spawn(processor::run(
+            rx,
+            webhook,
+            processor::MediaSettings {
+                dir: manager.opts.media_dir.clone(),
+                auto_download: manager.opts.auto_download_media,
+            },
+        ));
 
         let mut records = manager.registry.all().await?;
         if records.is_empty() {

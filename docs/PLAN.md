@@ -35,10 +35,12 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 - [x] Registry `storages/ruwa.db` (diesel migrations), tabel `devices`
 - [x] Semua `/devices/*` termasuk webhook per device
 - [x] Restore semua device saat startup
-- [ ] Upload media: `/send/image|file|audio|video`, `/send/location|contact|link`
-- [ ] `/user/check`, `/user/info`
-- [ ] Event: `message.reaction|revoked|edited`, `chat_presence`, `device.temporary_ban`
-- [ ] Payload media di webhook + auto-download media ke `storages/media/`
+- [x] Upload media: `/send/image|file|audio|video`, `/send/location|contact|link` (JSON, form, multipart; ffmpeg untuk video/PTT)
+- [x] `/user/check`, `/user/info`
+- [x] Event: `message.reaction|revoked|edited`, `chat_presence`, `device.temporary_ban`
+- [x] Payload media di webhook + auto-download media ke `statics/media/` (path GOWA) + kontak/lokasi
+
+- [ ] **Uji manual dengan akun test** (gabung dengan uji M1, lihat HANDOFF)
 
 **Selesai bila**: dua akun aktif paralel, n8n node GOWA bisa kirim teks & gambar ke keduanya.
 

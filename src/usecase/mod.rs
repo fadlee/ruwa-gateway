@@ -4,3 +4,5 @@
 pub mod app;
 pub mod device;
 pub mod send;
+pub mod send_media;
+pub mod user;

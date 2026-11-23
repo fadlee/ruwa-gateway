@@ -27,6 +27,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             root: PathBuf::from("storages/devices"),
             qr_dir: PathBuf::from("statics/qrcode"),
             os: cfg.os.clone(),
+            media_dir: PathBuf::from("statics/media"),
+            auto_download_media: cfg.auto_download_media,
         },
         Registry::new(db),
         webhook,

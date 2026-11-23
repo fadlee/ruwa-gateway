@@ -78,6 +78,10 @@ Satu binary crate `ruwa-gateway` dengan modul:
 - `tokio`, `axum`, `tower-http` (CORS, trace), `serde`/`serde_json`, `clap` (derive + env),
 - `diesel` 2.4 (sqlite) untuk registry & chat storage — **bukan sqlx**: whatsapp-rust sudah membawa diesel + `libsqlite3-sys` 0.40, dan dua versi `libsqlite3-sys` akan bentrok (`links = "sqlite3"`), `reqwest` (rustls) untuk webhook,
 - `hmac` + `sha2` untuk signature, `qrcode` + `image` untuk PNG QR, `tracing`.
+- Media: `image` (thumbnail/kompresi), `infer` + `mime_guess` (MIME), `serde_html_form` (form/multipart),
+  ffmpeg/ffprobe eksternal (opsional; wajib untuk video dan konversi PTT, sama seperti GOWA).
+- URL dari user (`*_url`, link preview) diambil lewat `media::fetch` yang menolak alamat non-publik
+  (loopback, privat, link-local, CGNAT) di setiap hop redirect.
 
 Toolchain: Rust stable ≥ 1.95 (MSRV whatsapp-rust).
 
@@ -202,9 +206,9 @@ contoh JSON di `webhook-payload.md` persis. Setiap contoh di dokumen itu menjadi
 
 | File | Isi | Owner |
 |---|---|---|
-| `storages/devices/<slot>/session.db` | state protokol (keys, sessions, app state) | whatsapp-rust `SqliteStore` |
-| `storages/ruwa.db` | `devices` (slot, jid, webhook cfg), `chats`, `messages`, `message_reactions`, `message_edits`, `poll_definitions`, `scheduled_sends` | ruwa-gateway (diesel migrations) |
-| `storages/media/` | media terunduh (`WHATSAPP_AUTO_DOWNLOAD_MEDIA`) | ruwa-gateway |
+| `storages/devices/<storage_key>/session.db` (`storage_key` = id bila aman sebagai nama file, selain itu `x`+hex) | state protokol (keys, sessions, app state) | whatsapp-rust `SqliteStore` |
+| `storages/ruwa.db` | `devices` (slot, `storage_key`, jid, webhook cfg), `chats`, `messages`, `message_reactions`, `message_edits`, `poll_definitions`, `scheduled_sends` | ruwa-gateway (diesel migrations) |
+| `statics/media/` | media terunduh (`WHATSAPP_AUTO_DOWNLOAD_MEDIA`), disajikan publik di `/statics/media` seperti GOWA | ruwa-gateway |
 | `statics/qrcode/` | PNG QR | ruwa-gateway |
 
 Skema chat storage meniru tabel GOWA `infrastructure/chatstorage/sqlite_repository.go` agar query

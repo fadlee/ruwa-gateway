@@ -8,6 +8,7 @@
 
 pub mod auth;
 pub mod device_scope;
+pub mod extract;
 pub mod response;
 pub mod routes;
 
@@ -53,13 +54,13 @@ pub fn router(state: AppState) -> Router {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| "statics".into());
 
-    let scoped =
-        routes::app::scoped()
-            .merge(routes::send::router())
-            .layer(middleware::from_fn_with_state(
-                state.clone(),
-                device_scope::resolve,
-            ));
+    let scoped = routes::app::scoped()
+        .merge(routes::send::router())
+        .merge(routes::user::router())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            device_scope::resolve,
+        ));
 
     let authed = Router::new()
         .merge(routes::app::unscoped())

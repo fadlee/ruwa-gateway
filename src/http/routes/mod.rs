@@ -3,3 +3,4 @@
 pub mod app;
 pub mod devices;
 pub mod send;
+pub mod user;

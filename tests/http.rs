@@ -45,6 +45,8 @@ async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Har
             root,
             qr_dir: qr_dir.clone(),
             os: "Chrome".into(),
+            media_dir: dir.path().join("statics/media"),
+            auto_download_media: true,
         },
         registry,
         Dispatcher::new(WebhookConfig::default()).unwrap(),
@@ -424,4 +426,156 @@ async fn device_reconnect_and_logout_messages() {
     let (status, body) = call(&h.app, req("POST", "/devices/default/logout", "")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["message"], "Logout requested");
+}
+
+fn multipart(
+    uri: &str,
+    fields: &[(&str, &str)],
+    file: Option<(&str, &str, &str, &[u8])>,
+) -> Request<Body> {
+    let boundary = "XBOUNDARYX";
+    let mut body = Vec::new();
+    for (k, v) in fields {
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n")
+                .as_bytes(),
+        );
+    }
+    if let Some((name, filename, ctype, bytes)) = file {
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\nContent-Type: {ctype}\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    Request::post(uri)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn expect_validation(h: &Harness, req: Request<Body>, message: &str) {
+    let (status, body) = call(&h.app, req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "VALIDATION_ERROR");
+    assert_eq!(body["message"], message);
+}
+
+#[tokio::test]
+async fn send_media_validation() {
+    let h = harness().await;
+    expect_validation(
+        &h,
+        multipart("/send/image", &[("phone", "628")], None),
+        "either Image or ImageURL must be provided",
+    )
+    .await;
+    expect_validation(
+        &h,
+        multipart(
+            "/send/image",
+            &[("phone", "628")],
+            Some(("image", "a.gif", "image/gif", b"GIF89a")),
+        ),
+        "your image is not allowed. please use jpg/jpeg/png",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json("/send/image", r#"{"phone":"628","image_url":"nope"}"#),
+        "ImageURL must be a valid URL",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json("/send/file", r#"{"phone":"628"}"#),
+        "either File or FileURL must be provided",
+    )
+    .await;
+    expect_validation(
+        &h,
+        multipart(
+            "/send/video",
+            &[("phone", "628")],
+            Some(("video", "a.webm", "video/webm", b"x")),
+        ),
+        "your video type is not allowed. please use mp4/mkv/avi/x-msvideo",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json("/send/audio", r#"{"phone":"628"}"#),
+        "either Audio or AudioURL must be provided",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json("/send/contact", r#"{"phone":"628"}"#),
+        "contact_name: cannot be blank; contact_phone: cannot be blank.",
+    )
+    .await;
+    expect_validation(&h, post_json("/send/contact", r#"{"phone":"628","contact_name":"A","contact_phone":"0812"}"#),
+        "contact phone number must be in international format (should not start with 0). For Indonesian numbers, use 62xxx format instead of 08xxx").await;
+    expect_validation(
+        &h,
+        post_json(
+            "/send/location",
+            r#"{"phone":"628","latitude":"200","longitude":"1"}"#,
+        ),
+        "latitude: must be a valid latitude.",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json("/send/link", r#"{"phone":"628","link":"x","caption":"c"}"#),
+        "link: must be a valid URL.",
+    )
+    .await;
+    expect_validation(
+        &h,
+        multipart(
+            "/send/image",
+            &[("phone", "628"), ("duration", "5")],
+            Some(("image", "a.png", "image/png", b"x")),
+        ),
+        "duration must be one of: 0 (no expiry), 86400 (24h), 604800 (7d), 7776000 (90d)",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn valid_media_send_needs_a_session() {
+    let h = harness().await;
+    let req = multipart(
+        "/send/image",
+        &[("phone", "628123"), ("caption", "hi")],
+        Some(("image", "a.png", "image/png", b"x")),
+    );
+    let (status, body) = call(&h.app, req).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "AUTHENTICATION_ERROR");
+    let (status, _) = call(
+        &h.app,
+        post_json(
+            "/send/location",
+            r#"{"phone":"628","latitude":"-6.2","longitude":"106.8"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn user_endpoints_require_login() {
+    let h = harness().await;
+    let (status, body) = call(&h.app, get("/user/check?phone=628123")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "AUTHENTICATION_ERROR");
+    let (status, body) = call(&h.app, get("/user/info")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["message"], "phone: cannot be blank.");
 }

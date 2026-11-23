@@ -32,6 +32,26 @@ pub trait Resolver: Send + Sync {
         is_from_me: bool,
         push_name: &str,
     ) -> impl Future<Output = String> + Send;
+
+    /// `WHATSAPP_AUTO_DOWNLOAD_MEDIA`.
+    fn auto_download(&self) -> bool;
+
+    /// Download and save incoming media; returns the stored path
+    /// (`statics/media/<unix>-<uuid><ext>`).
+    fn save_media<'a>(
+        &'a self,
+        media: MediaRef<'a>,
+    ) -> impl Future<Output = anyhow::Result<String>> + Send + 'a;
+}
+
+/// Downloadable media inside a message.
+#[derive(Debug, Clone, Copy)]
+pub enum MediaRef<'a> {
+    Image(&'a proto::message::ImageMessage),
+    Video(&'a proto::message::VideoMessage),
+    Audio(&'a proto::message::AudioMessage),
+    Document(&'a proto::message::DocumentMessage),
+    Sticker(&'a proto::message::StickerMessage),
 }
 
 /// One decrypted inbound (or self-synced) message.
@@ -218,7 +238,265 @@ pub async fn message_payload<R: Resolver>(
     if msgx::is_forwarded(&m.message) {
         p.insert("forwarded".into(), true.into());
     }
+    media_fields(r, msg, &mut p).await;
+    other_types(msg, &mut p);
     (MESSAGE, p)
+}
+
+/// GOWA `buildMediaFields`. With auto-download: a path string, or
+/// `{path, caption}` when there is a caption (audio/sticker: path only).
+/// Without: `{url, ...}`. A failed download leaves the key out.
+async fn media_fields<R: Resolver>(r: &R, msg: &proto::Message, p: &mut Map<String, Value>) {
+    async fn put<R: Resolver>(
+        r: &R,
+        p: &mut Map<String, Value>,
+        key: &str,
+        media: MediaRef<'_>,
+        caption: Option<&str>,
+        fallback: Value,
+    ) {
+        if !r.auto_download() {
+            p.insert(key.into(), fallback);
+            return;
+        }
+        match r.save_media(media).await {
+            Ok(path) => {
+                let value = match caption.filter(|c| !c.is_empty()) {
+                    Some(c) => json!({ "path": path, "caption": c }),
+                    None => path.into(),
+                };
+                p.insert(key.into(), value);
+            }
+            Err(error) => tracing::error!(%error, "failed to download {key}"),
+        }
+    }
+
+    if let Some(a) = msg.audio_message.as_option() {
+        let fallback = json!({ "url": a.url.clone().unwrap_or_default() });
+        put(r, p, "audio", MediaRef::Audio(a), None, fallback).await;
+    }
+    if let Some(d) = msg.document_message.as_option() {
+        let fallback = json!({
+            "url": d.url.clone().unwrap_or_default(),
+            "filename": d.file_name.clone().unwrap_or_default(),
+        });
+        put(
+            r,
+            p,
+            "document",
+            MediaRef::Document(d),
+            d.caption.as_deref(),
+            fallback,
+        )
+        .await;
+    }
+    if let Some(i) = msg.image_message.as_option() {
+        let fallback = json!({
+            "url": i.url.clone().unwrap_or_default(),
+            "caption": i.caption.clone().unwrap_or_default(),
+        });
+        put(
+            r,
+            p,
+            "image",
+            MediaRef::Image(i),
+            i.caption.as_deref(),
+            fallback,
+        )
+        .await;
+    }
+    if let Some(s) = msg.sticker_message.as_option() {
+        let fallback = json!({ "url": s.url.clone().unwrap_or_default() });
+        put(r, p, "sticker", MediaRef::Sticker(s), None, fallback).await;
+    }
+    if let Some(v) = msg.video_message.as_option() {
+        let fallback = json!({
+            "url": v.url.clone().unwrap_or_default(),
+            "caption": v.caption.clone().unwrap_or_default(),
+        });
+        put(
+            r,
+            p,
+            "video",
+            MediaRef::Video(v),
+            v.caption.as_deref(),
+            fallback,
+        )
+        .await;
+    }
+    if let Some(v) = msg.ptv_message.as_option() {
+        let fallback = json!({
+            "url": v.url.clone().unwrap_or_default(),
+            "caption": v.caption.clone().unwrap_or_default(),
+        });
+        put(
+            r,
+            p,
+            "video_note",
+            MediaRef::Video(v),
+            v.caption.as_deref(),
+            fallback,
+        )
+        .await;
+    }
+}
+
+/// Phone number from the first `TEL` line of a vCard (GOWA `ExtractPhoneFromVCard`).
+fn vcard_phone(vcard: &str) -> Option<String> {
+    vcard
+        .lines()
+        .find(|l| l.to_ascii_uppercase().starts_with("TEL"))
+        .and_then(|l| l.rsplit_once(':'))
+        .map(|(_, v)| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+}
+
+fn contact_json(c: &proto::message::ContactMessage) -> Value {
+    let vcard = c.vcard.clone().unwrap_or_default();
+    let mut v = json!({
+        "displayName": c.display_name.clone().unwrap_or_default(),
+        "vcard": vcard,
+    });
+    if let Some(phone) = vcard_phone(&vcard) {
+        v["phone_number"] = phone.into();
+    }
+    v
+}
+
+/// Go `encoding/json` of a proto struct: camelCase keys, empty fields omitted.
+fn insert_some<T: serde::Serialize>(v: &mut Map<String, Value>, key: &str, value: Option<T>) {
+    if let Some(value) = value {
+        let value = json!(value);
+        let empty = matches!(&value, Value::String(s) if s.is_empty())
+            || value == json!(0)
+            || value == json!(0.0)
+            || value == json!(false);
+        if !empty {
+            v.insert(key.into(), value);
+        }
+    }
+}
+
+fn b64(bytes: &Option<Vec<u8>>) -> Option<String> {
+    use base64::Engine;
+    bytes
+        .as_ref()
+        .filter(|b| !b.is_empty())
+        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+}
+
+/// GOWA `buildOtherMessageTypes` (contact, contacts array, locations).
+fn other_types(msg: &proto::Message, p: &mut Map<String, Value>) {
+    if let Some(c) = msg.contact_message.as_option() {
+        p.insert("contact".into(), contact_json(c));
+    }
+    if let Some(arr) = msg.contacts_array_message.as_option() {
+        let list: Vec<Value> = arr.contacts.iter().map(contact_json).collect();
+        p.insert("contacts_array".into(), Value::Array(list));
+    }
+    if let Some(l) = msg.location_message.as_option() {
+        let mut v = Map::new();
+        insert_some(&mut v, "degreesLatitude", l.degrees_latitude);
+        insert_some(&mut v, "degreesLongitude", l.degrees_longitude);
+        insert_some(&mut v, "name", l.name.clone());
+        insert_some(&mut v, "address", l.address.clone());
+        insert_some(&mut v, "URL", l.url.clone());
+        insert_some(&mut v, "isLive", l.is_live);
+        insert_some(&mut v, "accuracyInMeters", l.accuracy_in_meters);
+        insert_some(&mut v, "comment", l.comment.clone());
+        insert_some(&mut v, "JPEGThumbnail", b64(&l.jpeg_thumbnail));
+        p.insert("location".into(), Value::Object(v));
+    }
+    if let Some(l) = msg.live_location_message.as_option() {
+        let mut v = Map::new();
+        insert_some(&mut v, "degreesLatitude", l.degrees_latitude);
+        insert_some(&mut v, "degreesLongitude", l.degrees_longitude);
+        insert_some(&mut v, "accuracyInMeters", l.accuracy_in_meters);
+        insert_some(&mut v, "speedInMps", l.speed_in_mps);
+        insert_some(
+            &mut v,
+            "degreesClockwiseFromMagneticNorth",
+            l.degrees_clockwise_from_magnetic_north,
+        );
+        insert_some(&mut v, "caption", l.caption.clone());
+        insert_some(&mut v, "sequenceNumber", l.sequence_number);
+        insert_some(&mut v, "timeOffset", l.time_offset);
+        insert_some(&mut v, "JPEGThumbnail", b64(&l.jpeg_thumbnail));
+        p.insert("live_location".into(), Value::Object(v));
+    }
+}
+
+pub const CHAT_PRESENCE: &str = "chat_presence";
+pub const DEVICE_TEMPORARY_BAN: &str = "device.temporary_ban";
+
+/// Typing/recording state (GOWA `createChatPresencePayload`).
+#[derive(Debug, Clone)]
+pub struct ChatPresenceView {
+    pub chat: Jid,
+    pub sender: Jid,
+    pub is_group: bool,
+    /// `composing` or `paused`.
+    pub state: &'static str,
+    /// `""` or `"audio"`.
+    pub media: &'static str,
+}
+
+pub async fn chat_presence_envelope<R: Resolver>(
+    r: &R,
+    c: &ChatPresenceView,
+    device_id: &str,
+    now: i64,
+) -> Map<String, Value> {
+    let mut p = Map::new();
+    if c.sender.is_lid() {
+        p.insert("from_lid".into(), wa::jid::non_ad_string(&c.sender).into());
+    }
+    p.insert(
+        "from".into(),
+        normalize(r, &c.sender).await.to_string().into(),
+    );
+    p.insert(
+        "sender_display_name".into(),
+        r.display_name(&c.sender, false, "").await.into(),
+    );
+    p.insert("chat_id".into(), wa::jid::non_ad_string(&c.chat).into());
+    p.insert("state".into(), c.state.into());
+    p.insert("media".into(), c.media.into());
+    p.insert("is_group".into(), c.is_group.into());
+
+    let mut env = Map::new();
+    env.insert("event".into(), CHAT_PRESENCE.into());
+    env.insert("timestamp".into(), rfc3339(now).into());
+    if !device_id.is_empty() {
+        env.insert("device_id".into(), device_id.into());
+    }
+    env.insert("payload".into(), Value::Object(p));
+    env
+}
+
+/// whatsmeow `TempBanReason` descriptions.
+pub fn temp_ban_reason(code: i32) -> &'static str {
+    match code {
+        101 => "you sent too many messages to people who don't have you in their address books",
+        102 => "too many people blocked you",
+        103 => "you created too many groups with people who don't have you in their address books",
+        104 => "you sent the same message to too many people",
+        106 => "you sent too many messages to a broadcast list",
+        _ => "you may have violated the terms of service (unknown error)",
+    }
+}
+
+/// GOWA `temporaryBanPayload`.
+pub fn temporary_ban_payload(code: i32, expire_secs: i64, now: i64) -> Value {
+    let mut v = json!({
+        "code": code,
+        "reason": temp_ban_reason(code),
+        "expires_in_seconds": expire_secs,
+    });
+    if expire_secs > 0 {
+        v["expires_at"] = rfc3339(now + expire_secs).into();
+    }
+    v
 }
 
 /// `mentions` / `mentions_lid` (GOWA `buildMentionFields`).

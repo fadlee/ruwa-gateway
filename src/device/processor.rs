@@ -1,6 +1,9 @@
 //! Event pump: whatsapp-rust events → slot state + GOWA webhooks.
 
-use std::sync::{Arc, Weak, atomic::Ordering};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Weak, atomic::Ordering},
+};
 
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -10,7 +13,7 @@ use super::{
     recent::RecentMessage,
 };
 use crate::{
-    events::{self, IncomingMessage, ReceiptView, Resolver},
+    events::{self, IncomingMessage, MediaRef, ReceiptView, Resolver},
     wa::{
         Jid, message as msgx,
         sdk::prelude::{Client, Event, EventHandler, EventInterest, EventKind, InboundMessage},
@@ -47,6 +50,8 @@ const KINDS: &[EventKind] = &[
     EventKind::LoggedOut,
     EventKind::Messages,
     EventKind::Receipt,
+    EventKind::ChatPresence,
+    EventKind::TemporaryBan,
 ];
 
 impl EventHandler for Relay {
@@ -61,13 +66,28 @@ impl EventHandler for Relay {
     }
 }
 
-pub(super) async fn run(mut rx: mpsc::UnboundedReceiver<Job>, webhook: Dispatcher) {
+#[derive(Debug, Clone)]
+pub(super) struct MediaSettings {
+    pub dir: PathBuf,
+    pub auto_download: bool,
+}
+
+pub(super) async fn run(
+    mut rx: mpsc::UnboundedReceiver<Job>,
+    webhook: Dispatcher,
+    media: MediaSettings,
+) {
     while let Some(Job { device, event }) = rx.recv().await {
-        handle(&device, &event, &webhook).await;
+        handle(&device, &event, &webhook, &media).await;
     }
 }
 
-async fn handle(device: &Arc<DeviceInstance>, event: &Event, webhook: &Dispatcher) {
+async fn handle(
+    device: &Arc<DeviceInstance>,
+    event: &Event,
+    webhook: &Dispatcher,
+    media: &MediaSettings,
+) {
     match event {
         Event::PairingQrCode(qr) => {
             device.qr.send_replace(Some(QrCode {
@@ -133,7 +153,7 @@ async fn handle(device: &Arc<DeviceInstance>, event: &Event, webhook: &Dispatche
             let Some(client) = device.client() else {
                 return;
             };
-            let resolver = ClientResolver::new(client);
+            let resolver = ClientResolver::new(client, media.clone());
             for inbound in batch.messages.iter() {
                 let m = incoming(inbound);
                 remember(device, &resolver, &m).await;
@@ -158,11 +178,54 @@ async fn handle(device: &Arc<DeviceInstance>, event: &Event, webhook: &Dispatche
             let Some(client) = device.client() else {
                 return;
             };
-            let resolver = ClientResolver::new(client);
+            let resolver = ClientResolver::new(client, media.clone());
             let mut env =
                 events::receipt_envelope(&resolver, &view, &device.jid().unwrap_or_default()).await;
             add_session_id(device, &mut env);
             webhook.send(events::MESSAGE_ACK, env, &device.webhook());
+        }
+        Event::ChatPresence(cp) => {
+            use crate::wa::sdk::wacore::types::presence::ChatActivity;
+            let (state, media_kind) = match cp.state {
+                ChatActivity::Typing => ("composing", ""),
+                ChatActivity::RecordingAudio => ("composing", "audio"),
+                _ => ("paused", ""),
+            };
+            let Some(client) = device.client() else {
+                return;
+            };
+            let resolver = ClientResolver::new(client, media.clone());
+            let view = events::ChatPresenceView {
+                chat: cp.source.chat.clone(),
+                sender: cp.source.sender.clone(),
+                is_group: cp.source.is_group,
+                state,
+                media: media_kind,
+            };
+            let mut env = events::chat_presence_envelope(
+                &resolver,
+                &view,
+                &device.jid().unwrap_or_default(),
+                super::now(),
+            )
+            .await;
+            add_session_id(device, &mut env);
+            webhook.send(events::CHAT_PRESENCE, env, &device.webhook());
+        }
+        Event::TemporaryBan(ban) => {
+            tracing::warn!(device = %device.id(), code = ban.code.code(), "temporarily banned");
+            let env = events::device_envelope(
+                events::DEVICE_TEMPORARY_BAN,
+                device.id(),
+                device.jid().as_deref(),
+                events::temporary_ban_payload(
+                    ban.code.code(),
+                    ban.expire.as_secs() as i64,
+                    super::now(),
+                ),
+                super::now(),
+            );
+            webhook.send(events::DEVICE_TEMPORARY_BAN, env, &device.webhook());
         }
         _ => {}
     }
@@ -219,11 +282,12 @@ async fn remember(device: &DeviceInstance, r: &ClientResolver, m: &IncomingMessa
 /// `Resolver` backed by a live client's LID store and identity.
 pub struct ClientResolver {
     client: Arc<Client>,
+    media: MediaSettings,
 }
 
 impl ClientResolver {
-    pub fn new(client: Arc<Client>) -> Self {
-        Self { client }
+    pub(super) fn new(client: Arc<Client>, media: MediaSettings) -> Self {
+        Self { client, media }
     }
 }
 
@@ -257,5 +321,72 @@ impl Resolver for ClientResolver {
             sender.clone()
         };
         jid.user.to_string()
+    }
+
+    fn auto_download(&self) -> bool {
+        self.media.auto_download
+    }
+
+    async fn save_media<'a>(&'a self, media: MediaRef<'a>) -> anyhow::Result<String> {
+        use crate::wa::sdk::download::{DownloadLimits, Downloadable};
+
+        let (source, mime, filename, length): (&dyn Downloadable, String, String, u64) = match media
+        {
+            MediaRef::Image(m) => (
+                m,
+                m.mimetype.clone().unwrap_or_default(),
+                String::new(),
+                m.file_length.unwrap_or(0),
+            ),
+            MediaRef::Video(m) => (
+                m,
+                m.mimetype.clone().unwrap_or_default(),
+                String::new(),
+                m.file_length.unwrap_or(0),
+            ),
+            MediaRef::Audio(m) => (
+                m,
+                m.mimetype.clone().unwrap_or_default(),
+                String::new(),
+                m.file_length.unwrap_or(0),
+            ),
+            MediaRef::Sticker(m) => (
+                m,
+                m.mimetype.clone().unwrap_or_default(),
+                String::new(),
+                m.file_length.unwrap_or(0),
+            ),
+            MediaRef::Document(m) => (
+                m,
+                m.mimetype.clone().unwrap_or_default(),
+                m.file_name.clone().unwrap_or_default(),
+                m.file_length.unwrap_or(0),
+            ),
+        };
+        if length > crate::media::MAX_DOWNLOAD_SIZE {
+            anyhow::bail!(
+                "file size exceeds the maximum limit of {} bytes",
+                crate::media::MAX_DOWNLOAD_SIZE
+            );
+        }
+        let bytes = self
+            .client
+            .download(source, DownloadLimits::default())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mime = if mime.is_empty() {
+            crate::media::detect_mime(&bytes, &filename)
+        } else {
+            mime
+        };
+        let name = format!(
+            "{}-{}{}",
+            super::now(),
+            uuid::Uuid::new_v4(),
+            crate::media::extension_for(&filename, &mime)
+        );
+        let path = self.media.dir.join(&name);
+        tokio::fs::write(&path, &bytes).await?;
+        Ok(path.to_string_lossy().into_owned())
     }
 }

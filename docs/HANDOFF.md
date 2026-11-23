@@ -6,31 +6,39 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 1 (M1). Kode selesai, **tinggal uji manual dengan HP/akun test**.
-- **Build**: `cargo build`, `cargo test` (50 test: 35 unit + 15 HTTP), `cargo clippy --all-targets` → hijau
-- **Terverifikasi live** (tanpa akun): handshake ke server WhatsApp, `/app/login` → PNG QR valid
-  dalam ~1 detik, login ulang, logout menghapus session, shutdown Ctrl+C bersih.
-- **Belum terverifikasi live**: scan QR sampai paired, `/app/login-with-code`, kirim teks,
-  webhook pesan masuk/receipt, `device.logged_out` saat unlink dari HP, restore session saat restart.
+- **Fase aktif**: Fase 2 (M2) kode selesai. Fase 1+2 **belum diuji manual dengan HP** (ditunda atas
+  permintaan user) → lanjut Fase 3 boleh, tapi uji manual tetap prioritas sebelum rilis.
+- **Build**: `cargo test` (90 test: 67 unit + 23 HTTP; 1 test jaringan `#[ignore]`),
+  `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
+- **Terverifikasi live tanpa akun**: handshake + QR (`/app/login`, `/devices/{id}/login`), multi-device,
+  registry bertahan setelah restart (termasuk webhook per device), link preview ke internet.
+- **Belum terverifikasi live**: semua yang butuh akun ter-pair (kirim teks/media, upload ke CDN WhatsApp,
+  webhook pesan masuk/media/receipt/presence, auto-download, `/user/*`, logout remote, temp ban).
 - **whatsapp-rust rev**: `94877bedb6cd473864f9f6b332a5c13d5fbef789`
 - **GOWA acuan**: `3744c92a24fa0806c68df9bf6a34db4340016e10` (snapshot di `docs/upstream/`)
 
 ## Langkah berikutnya
 
-1. **Uji manual M1** (butuh HP dengan akun test):
+1. **Uji manual M1+M2** (butuh HP dengan akun test):
    ```sh
-   # terminal 1: penerima webhook sederhana
-   python3 -m http.server 9000   # atau https://webhook.site
-   # terminal 2
+   # terminal 1: penerima webhook (atau https://webhook.site)
+   python3 -m http.server 9000
+   # terminal 2 (jalankan dari direktori kerja terpisah; server menulis storages/ & statics/ di cwd)
    APP_HOST=127.0.0.1 WHATSAPP_WEBHOOK=http://127.0.0.1:9000/hook cargo run -- rest
-   curl localhost:3000/app/login            # buka qr_link, scan dari HP
-   curl localhost:3000/app/status           # is_logged_in: true, jid terisi
+   curl localhost:3000/app/login                      # buka qr_link, scan dari HP
+   curl localhost:3000/app/status                     # is_logged_in: true
    curl -XPOST localhost:3000/send/message -H 'content-type: application/json' \
         -d '{"phone":"62xxx","message":"halo dari ruwa"}'
+   curl -XPOST localhost:3000/send/image -F phone=62xxx -F caption=tes -F image=@foto.jpg
+   curl -XPOST localhost:3000/send/audio -F phone=62xxx -F ptt=true -F audio=@suara.mp3
+   curl "localhost:3000/user/check?phone=62xxx"
    ```
-   Cek: pesan sampai di HP; balas dari HP → webhook `message`; receipt → `message.ack`;
-   restart server → session pulih tanpa scan; unlink dari HP → webhook `device.logged_out`.
-2. Setelah lolos: commit, centang item uji manual di PLAN, lanjut Fase 2 (registry diesel + `/devices/*`, media).
+   Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
+   `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
+   `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
+2. Fase 3: chat storage (diesel) → `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, sisa `/user/*`,
+   sticker/poll/presence, event grup/label/call. Chat storage juga menutup beberapa gap di bawah
+   (nama kontak, reply setelah restart, default ephemeral).
 
 ## Keputusan yang sudah diambil
 
@@ -46,6 +54,11 @@
 | 2026-11-23 | Logout lokal men-set flag `local_logout` agar event `LoggedOut` tidak dikirim sebagai webhook | GOWA hanya mengirim `device.logged_out` untuk logout dari sisi WhatsApp |
 | 2026-11-23 | `/app/login` selalu membuat bot baru (stop → start) | sama dengan GOWA (#851: QR channel lama mengganggu sesi baru) |
 | 2026-11-23 | Gagal bind body → 500 `INTERNAL_SERVER_ERROR` | perilaku GOWA (panic di `Bind().Body` → Recovery) |
+| 2026-11-23 | Registry device di `storages/ruwa.db` (diesel, migrasi embedded) menggantikan marker file `jid` Fase 1 | data slot + webhook per device perlu tempat; slot Fase 1 tanpa baris registry diabaikan (belum ada user) |
+| 2026-11-23 | Direktori session = `storage_key` (id bila aman, selain itu `x`+hex) | id device GOWA bebas (mis. `../a`); cegah path traversal |
+| 2026-11-23 | Request body media **tanpa** `#[serde(flatten)]` | flatten membuat form/multipart gagal parse angka/bool (`duration`, `is_forwarded`) — ada test |
+| 2026-11-23 | Fetch URL dari user menolak IP non-publik di tiap hop redirect | setara `newUntrustedHTTPClient` GOWA; cegah SSRF |
+| 2026-11-23 | `compress` gambar default `true` (JSON tanpa field / multipart), video default `false` | GOWA preset `Compress = true` hanya di handler image |
 
 ## Catatan / jebakan
 
@@ -62,6 +75,14 @@
   - `allow_reshare` divalidasi tapi flag reshare belum dipasang ke pesan status.
   - Status message `/send/message` memakai waktu lokal server (UTC), bukan timestamp ack server.
   - `qr_duration` = setengah timeout QR dari whatsapp-rust (hasil live: 29), GOWA/whatsmeow biasanya 30.
+  - Link preview: hanya `jpegThumbnail` inline; GOWA juga meng-upload thumbnail resolusi tinggi (`MediaLinkThumbnail`).
+  - Kirim media ke newsletter memakai upload biasa (GOWA: `UploadNewsletter`) → kemungkinan gagal; Fase 4.
+  - Thumbnail dokumen hanya untuk file gambar (GOWA juga PDF).
+  - `/user/info`: `name` kosong (butuh chat storage); daftar device dari usync device list.
+  - `chat_presence`: WhatsApp hanya mengirim typing bila akun "online"; GOWA punya presence pulse
+    (`presence-pulse-*`) yang belum diport → event typing mungkin jarang/tidak muncul.
+  - Belum ada: `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`, `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`, batas ukuran
+    via env (`WHATSAPP_SETTING_MAX_*`); konstanta default GOWA dipakai.
 - Header signature webhook GOWA: `X-Hub-Signature-256: sha256=<hex>`; body JSON key tersortir (Go map).
 - Event `message` tidak punya `timestamp` top-level; `message.ack` dan `device.*` punya.
 - Fitur `legacy-session-interop` di whatsapp-rust kandidat untuk migrasi sesi whatsmeow (Fase 5 spike).
@@ -71,6 +92,14 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-23 — Fase 2 (M2) kode selesai
+- 2a (`c913bab`): `storage/` (diesel + migrasi), registry device, `/devices/*` lengkap, webhook per device
+  (aturan fallback GOWA), restore semua slot saat start; diuji live (2 slot, restart).
+- 2b: `media/` (gambar: thumbnail/compress/HD; ffmpeg: thumbnail video, transcode, Opus PTT, waveform; fetch URL anti-SSRF;
+  link preview og-tags; MIME), `/send/image|file|video|audio|contact|location|link`, ekstraktor JSON/form/multipart,
+  `/user/check`, `/user/info`, webhook media (auto-download ke `statics/media/` atau `{url}`), kontak, lokasi,
+  `chat_presence`, `device.temporary_ban`. Golden test baru untuk semua contoh tersebut di dokumen GOWA.
 
 ### 2026-11-23 — Fase 1 (M1) kode selesai
 - `wa/`: port `SanitizePhone`/`ParseJID` GOWA, helper proto (`text`, `caption`, `context_info`, builder `extendedTextMessage`).

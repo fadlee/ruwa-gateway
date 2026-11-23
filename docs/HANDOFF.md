@@ -6,8 +6,8 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; berikutnya sisa `/user/*` (my/newsletters, business-profile), sticker/poll/presence, event grup.
-- **Build**: `cargo test` (151 test: 112 unit + 39 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; berikutnya sisa `/user/*` (my/newsletters, business-profile), sticker/poll/presence, label/call.
+- **Build**: `cargo test` (154 test: 115 unit + 39 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -45,7 +45,7 @@
    `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
    `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
 2. Fase 3 lanjutan: sisa `/user/*` (my/newsletters, business-profile), sticker/poll/
-   presence, event grup/label/call (`group.participants|info|joined` dari `GroupUpdate`), auto reply/mark read/reject call.
+   presence, event label/call, auto reply/mark read/reject call.
 
 ## Keputusan yang sudah diambil
 
@@ -91,6 +91,7 @@
 
 ## Catatan / jebakan
 
+- Event grup: `Add` → `group.participants` join (+ `group.joined` bila akun sendiri ada di daftar), `Remove` → leave, `Promote`/`Demote`; `Subject` → `group.info` + nama chat tersimpan diganti (`rename_chat`, hanya bila chat sudah ada). Belum: `Create` (raw node) tidak memicu `group.joined`; `reason` hanya `invite`/kosong (whatsmeow punya jenis lain); `Modify`, description, locked/announce tidak dikirim (GOWA juga tidak). `group.joined` dikirim berdampingan dengan `group.participants` untuk akun sendiri — belum dicek apakah whatsmeow melakukan hal sama.
 - Cold build pertama ~4,5 menit (whatsapp-rust besar). Clippy cold ~2 menit.
 - Server menolak start bila `APP_BASIC_AUTH` kosong dan host bukan loopback (perilaku GOWA).
   Untuk dev lokal pakai `APP_HOST=127.0.0.1`.
@@ -144,6 +145,10 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — Fase 3: event grup (`GroupUpdate`)
+- `events/mod.rs`: `group_participants_envelope`, `group_info_envelope` (`name_set_by` utamakan PN, kosong bila tak diketahui), `group_joined_envelope`. `device/processor.rs`: `group_update` (+ `EventKind::GroupUpdate`). `storage::ChatStore::rename_chat`.
+- Test: golden dari `webhook-payload.md` (join/leave/promote/demote/name change; LID di-resolve), bentuk `group.joined`, `rename_chat`. Belum diuji dengan akun live (cek: ganti nama grup dari HP lain → webhook `group.info` + `GET /chats` ikut berubah).
 
 ### 2026-11-24 — Fase 3: `/user/presence/subscribe`, `/user/avatar`
 - `usecase/user.rs`: `subscribe_presence` (`presence().subscribe`), `avatar` (`pictures().lookup`; `Fetched` + `combine` murni untuk klasifikasi/fallback), `change_avatar`. Route di `http/routes/user.rs`.

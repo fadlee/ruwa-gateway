@@ -439,6 +439,22 @@ impl ChatStore {
             .await
     }
 
+    /// Set the name of an already stored chat (a subject change announced by
+    /// the server); unknown chats are left alone.
+    pub async fn rename_chat(&self, device: &str, jid: &str, name: &str) -> anyhow::Result<bool> {
+        let (device, jid, name) = (device.to_owned(), jid.to_owned(), name.to_owned());
+        let now = crate::device::now();
+        let changed = self
+            .db
+            .run(move |c| {
+                diesel::update(chats::table.find((&jid, &device)))
+                    .set((chats::name.eq(&name), chats::updated_at.eq(now)))
+                    .execute(c)
+            })
+            .await?;
+        Ok(changed > 0)
+    }
+
     /// Rename a chat only while it still carries `expected` (so a name set
     /// meanwhile by a message or history sync is never overwritten).
     pub async fn rename_chat_if(
@@ -1125,6 +1141,14 @@ mod tests {
             s.get_chat(DEV, "1@g.us").await.unwrap().unwrap().name,
             "Family"
         );
+        // A server-announced subject always wins, but never creates a chat.
+        assert!(s.rename_chat(DEV, "1@g.us", "Renamed").await.unwrap());
+        assert!(!s.rename_chat(DEV, "9@g.us", "Ghost").await.unwrap());
+        assert_eq!(
+            s.get_chat(DEV, "1@g.us").await.unwrap().unwrap().name,
+            "Renamed"
+        );
+        assert!(s.get_chat(DEV, "9@g.us").await.unwrap().is_none());
     }
 
     #[tokio::test]

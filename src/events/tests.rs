@@ -514,3 +514,104 @@ async fn lid_mentions_in_body_are_rewritten() {
         "hi @628111111111 a@251556368777322 @999"
     );
 }
+
+fn group_doc(heading: &str) -> Value {
+    let mut v = doc_example(heading);
+    v["payload"]["chat_id"] = json!("120363402106@g.us");
+    if let Some(jids) = v["payload"].get_mut("jids").and_then(Value::as_array_mut) {
+        for (i, j) in jids.iter_mut().enumerate() {
+            *j = json!(format!("628990000000{i}@s.whatsapp.net"));
+        }
+    }
+    if v["payload"].get("name_set_by").is_some() {
+        v["payload"]["name_set_by"] = json!("6289685000000@s.whatsapp.net");
+    }
+    v
+}
+
+#[tokio::test]
+async fn group_participants_events() {
+    let r = FakeResolver::new(&[("251556368777322", "6289900000001")]);
+    let group = jid("120363402106@g.us");
+    for (heading, kind, n, ts) in [
+        ("Group Member Join", "join", 2, "2025-07-28T10:30:00Z"),
+        ("Group Member Leave", "leave", 1, "2025-07-28T10:32:00Z"),
+        (
+            "Group Member Promotion",
+            "promote",
+            1,
+            "2025-07-28T10:33:00Z",
+        ),
+        ("Group Member Demotion", "demote", 1, "2025-07-28T10:34:00Z"),
+    ] {
+        // The second member of a join arrives as a LID and is resolved.
+        let jids: Vec<Jid> = (0..n)
+            .map(|i| {
+                if i == 1 {
+                    jid("251556368777322@lid")
+                } else {
+                    jid(&format!("628990000000{i}@s.whatsapp.net"))
+                }
+            })
+            .collect();
+        let actual = Value::Object(
+            group_participants_envelope(
+                &r,
+                &group,
+                kind,
+                &jids,
+                "628123456789@s.whatsapp.net",
+                secs(ts),
+            )
+            .await,
+        );
+        assert_matches_doc(&actual, &group_doc(heading));
+    }
+}
+
+#[tokio::test]
+async fn group_name_change() {
+    let r = FakeResolver::new(&[("251556368777322", "6289685000000")]);
+    let group = jid("120363402106@g.us");
+    let owner = jid("251556368777322@lid");
+    let actual = Value::Object(
+        group_info_envelope(
+            &r,
+            &group,
+            "Project Team",
+            Some((&owner, None)),
+            "628123456789@s.whatsapp.net",
+            secs("2025-07-28T10:35:00Z"),
+        )
+        .await,
+    );
+    assert_matches_doc(&actual, &group_doc("Group Name Change"));
+
+    // The phone-number alias wins; no renamer → field omitted.
+    let pn = jid("6289111111111@s.whatsapp.net");
+    let with_pn = group_info_envelope(&r, &group, "X", Some((&owner, Some(&pn))), "", 0).await;
+    assert_eq!(
+        with_pn["payload"]["name_set_by"],
+        "6289111111111@s.whatsapp.net"
+    );
+    assert!(with_pn.get("device_id").is_none());
+    let none = group_info_envelope(&r, &group, "X", None, "d", 0).await;
+    assert!(none["payload"].get("name_set_by").is_none());
+}
+
+#[test]
+fn group_joined_shape() {
+    let env = group_joined_envelope(
+        &jid("120363402106@g.us"),
+        &jid("628123456789:5@s.whatsapp.net"),
+        "invite",
+        "Team",
+        "628123456789@s.whatsapp.net",
+        0,
+    );
+    assert_eq!(env["event"], "group.joined");
+    assert_eq!(
+        env["payload"],
+        json!({"chat_id":"120363402106@g.us","type":"join","jids":["628123456789@s.whatsapp.net"],"reason":"invite","group_name":"Team"})
+    );
+}

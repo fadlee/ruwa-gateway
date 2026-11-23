@@ -59,6 +59,7 @@ const KINDS: &[EventKind] = &[
     EventKind::HistorySync,
     EventKind::ArchiveUpdate,
     EventKind::ContactUpdate,
+    EventKind::GroupUpdate,
 ];
 
 impl EventHandler for Relay {
@@ -350,6 +351,9 @@ async fn handle(
                 tracing::warn!(device = %device.id(), %error, "failed to store contact");
             }
         }
+        Event::GroupUpdate(update) => {
+            group_update(device, update, webhook, media).await;
+        }
         Event::StreamReplaced(_) => {
             tracing::warn!(device = %device.id(), "stream replaced by another client");
             hub.publish(
@@ -363,6 +367,146 @@ async fn handle(
 }
 
 /// GOWA `addWebhookSessionID`: tag events with the slot that emitted them.
+/// `w:gp2` notifications → `group.participants` / `group.info` /
+/// `group.joined` webhooks (GOWA `handleGroupInfo`, `handleJoinedGroup`) and
+/// the stored chat name on a subject change.
+async fn group_update(
+    device: &Arc<DeviceInstance>,
+    update: &crate::wa::sdk::wacore::types::events::GroupUpdate,
+    webhook: &Dispatcher,
+    media: &MediaSettings,
+) {
+    use crate::wa::sdk::wacore::stanza::groups::GroupNotificationAction as A;
+
+    let Some(client) = device.client() else {
+        return;
+    };
+    let resolver = ClientResolver::new(client, media.clone(), device);
+    let device_id = device.jid().unwrap_or_default();
+    let ts = update.timestamp.as_secs();
+    let group = &update.group_jid;
+    let own_user = device_id.parse::<Jid>().ok().map(|j| j.user.to_string());
+    let is_own = |j: &Jid| own_user.as_deref() == Some(&*j.user);
+
+    let participants = |list: &[crate::wa::sdk::wacore::stanza::groups::GroupParticipantInfo]| {
+        list.iter()
+            .map(|p| p.phone_number.clone().unwrap_or_else(|| p.jid.clone()))
+            .collect::<Vec<Jid>>()
+    };
+    let mut sent: Vec<(&str, serde_json::Map<String, Value>)> = Vec::new();
+    match &*update.action {
+        A::Add {
+            participants: list,
+            reason,
+            ..
+        } => {
+            let jids = participants(list);
+            sent.push((
+                events::GROUP_PARTICIPANTS,
+                events::group_participants_envelope(
+                    &resolver, group, "join", &jids, &device_id, ts,
+                )
+                .await,
+            ));
+            if let Some(me) = jids
+                .iter()
+                .chain(list.iter().map(|p| &p.jid))
+                .find(|j| is_own(j))
+            {
+                let name = device
+                    .chats()
+                    .get_chat(&device.storage_partition(), &group.to_non_ad().to_string())
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|c| c.name)
+                    .unwrap_or_default();
+                let reason = match reason.as_deref() {
+                    Some("invite") => "invite",
+                    _ => "",
+                };
+                sent.push((
+                    events::GROUP_JOINED,
+                    events::group_joined_envelope(group, me, reason, &name, &device_id, ts),
+                ));
+            }
+        }
+        A::Remove {
+            participants: list, ..
+        } => sent.push((
+            events::GROUP_PARTICIPANTS,
+            events::group_participants_envelope(
+                &resolver,
+                group,
+                "leave",
+                &participants(list),
+                &device_id,
+                ts,
+            )
+            .await,
+        )),
+        A::Promote {
+            participants: list, ..
+        } => sent.push((
+            events::GROUP_PARTICIPANTS,
+            events::group_participants_envelope(
+                &resolver,
+                group,
+                "promote",
+                &participants(list),
+                &device_id,
+                ts,
+            )
+            .await,
+        )),
+        A::Demote {
+            participants: list, ..
+        } => sent.push((
+            events::GROUP_PARTICIPANTS,
+            events::group_participants_envelope(
+                &resolver,
+                group,
+                "demote",
+                &participants(list),
+                &device_id,
+                ts,
+            )
+            .await,
+        )),
+        A::Subject {
+            subject,
+            subject_owner,
+            subject_owner_pn,
+            ..
+        } => {
+            if let Err(error) = device
+                .chats()
+                .rename_chat(
+                    &device.storage_partition(),
+                    &group.to_non_ad().to_string(),
+                    subject,
+                )
+                .await
+            {
+                tracing::warn!(device = %device.id(), %error, "failed to rename group chat");
+            }
+            let set_by = subject_owner
+                .as_ref()
+                .map(|o| (o, subject_owner_pn.as_ref()));
+            sent.push((
+                events::GROUP_INFO,
+                events::group_info_envelope(&resolver, group, subject, set_by, &device_id, ts)
+                    .await,
+            ));
+        }
+        _ => {}
+    }
+    for (name, mut env) in sent {
+        add_session_id(device, &mut env);
+        webhook.send(name, env, &device.webhook());
+    }
+}
+
 fn add_session_id(device: &DeviceInstance, env: &mut serde_json::Map<String, Value>) {
     if device.jid().is_some() {
         env.entry("session_id")

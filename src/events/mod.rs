@@ -444,6 +444,9 @@ fn other_types(msg: &proto::Message, p: &mut Map<String, Value>) {
 
 pub const CHAT_PRESENCE: &str = "chat_presence";
 pub const DEVICE_TEMPORARY_BAN: &str = "device.temporary_ban";
+pub const GROUP_PARTICIPANTS: &str = "group.participants";
+pub const GROUP_INFO: &str = "group.info";
+pub const GROUP_JOINED: &str = "group.joined";
 
 /// Typing/recording state (GOWA `createChatPresencePayload`).
 #[derive(Debug, Clone)]
@@ -673,6 +676,86 @@ pub fn device_envelope(
         env.insert("device_id".into(), jid.into());
     }
     env
+}
+
+fn group_envelope(event: &str, device_id: &str, ts: i64, payload: Value) -> Map<String, Value> {
+    let mut env = Map::new();
+    env.insert("event".into(), event.into());
+    env.insert("payload".into(), payload);
+    env.insert("timestamp".into(), rfc3339(ts).into());
+    if !device_id.is_empty() {
+        env.insert("device_id".into(), device_id.into());
+    }
+    env
+}
+
+/// JIDs as GOWA `jidsToStrings`: LID → phone number when known, non-AD.
+async fn jid_strings<R: Resolver>(r: &R, jids: &[Jid]) -> Vec<String> {
+    let mut out = Vec::with_capacity(jids.len());
+    for jid in jids {
+        out.push(normalize(r, jid).await.to_string());
+    }
+    out
+}
+
+/// `group.participants` (`join` | `leave` | `promote` | `demote`).
+pub async fn group_participants_envelope<R: Resolver>(
+    r: &R,
+    group: &Jid,
+    kind: &str,
+    jids: &[Jid],
+    device_id: &str,
+    ts: i64,
+) -> Map<String, Value> {
+    let payload = json!({
+        "chat_id": group.to_non_ad().to_string(),
+        "type": kind,
+        "jids": jid_strings(r, jids).await,
+    });
+    group_envelope(GROUP_PARTICIPANTS, device_id, ts, payload)
+}
+
+/// `group.info` for a subject change. `set_by` prefers the phone-number JID
+/// WhatsApp sends next to a LID (GOWA `groupNameSetBy`); omitted when unknown.
+pub async fn group_info_envelope<R: Resolver>(
+    r: &R,
+    group: &Jid,
+    name: &str,
+    set_by: Option<(&Jid, Option<&Jid>)>,
+    device_id: &str,
+    ts: i64,
+) -> Map<String, Value> {
+    let mut p = Map::new();
+    p.insert("chat_id".into(), group.to_non_ad().to_string().into());
+    p.insert("name".into(), name.into());
+    if let Some((owner, owner_pn)) = set_by {
+        let who = match owner_pn {
+            Some(pn) => pn.to_non_ad(),
+            None => normalize(r, owner).await,
+        };
+        p.insert("name_set_by".into(), who.to_string().into());
+    }
+    group_envelope(GROUP_INFO, device_id, ts, Value::Object(p))
+}
+
+/// `group.joined`: this account was added to (or created) a group.
+pub fn group_joined_envelope(
+    group: &Jid,
+    own: &Jid,
+    reason: &str,
+    group_name: &str,
+    device_id: &str,
+    ts: i64,
+) -> Map<String, Value> {
+    let mut p = Map::new();
+    p.insert("chat_id".into(), group.to_non_ad().to_string().into());
+    p.insert("type".into(), "join".into());
+    p.insert("jids".into(), json!([own.to_non_ad().to_string()]));
+    p.insert("reason".into(), reason.into());
+    if !group_name.is_empty() {
+        p.insert("group_name".into(), group_name.into());
+    }
+    group_envelope(GROUP_JOINED, device_id, ts, Value::Object(p))
 }
 
 pub fn logged_out_payload(code: i32, on_connect: bool) -> Value {

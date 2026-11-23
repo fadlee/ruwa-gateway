@@ -55,7 +55,8 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 - [x] `/user/my/privacy`, `/user/pushname`, `/user/my/contacts`, `/user/my/contacts/detailed`
 - [x] `/user/presence/subscribe`, `/user/avatar` (GET + POST)
 - [ ] Sisa `/user/*` (my/newsletters, business-profile), `/send/sticker|poll|presence|chat-presence`, `/call/reject`
-- [ ] Event: `message.deleted`, `presence`, `group.*`, `label.*`, `call.offer`, `device.reachout_timelock`
+- [x] Event `group.participants|info|joined` (dari `GroupUpdate`)
+- [ ] Event: `message.deleted`, `presence`, `label.*`, `call.offer`, `device.reachout_timelock`
 - [ ] Auto reply, auto mark read, auto reject call
 
 ## Fase 4 — M4: newsletter, scheduler, UI

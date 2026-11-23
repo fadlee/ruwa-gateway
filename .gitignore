@@ -1,0 +1,6 @@
+/target
+/storages
+/statics/qrcode
+.env
+*.db
+*.db-*

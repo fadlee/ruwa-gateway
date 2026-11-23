@@ -1,0 +1,31 @@
+[package]
+name = "ruwa-gateway"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "GOWA-compatible WhatsApp REST API built on whatsapp-rust"
+publish = false
+
+[dependencies]
+# WhatsApp protocol. Pinned to a git rev: the 0.7.0 crates.io release enables
+# `simd`, which needs nightly. Only `src/wa/` may import this crate directly.
+# Bump procedure: see docs/PLAN.md "Konvensi kerja".
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "94877bedb6cd473864f9f6b332a5c13d5fbef789", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native"] }
+
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "sync", "time"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4.5", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+base64 = "0.22"
+subtle = "2"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

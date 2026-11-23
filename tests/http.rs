@@ -52,6 +52,7 @@ async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Har
             auto_reject_call: false,
             auto_mark_read: false,
             auto_reply: String::new(),
+            presence: Default::default(),
         },
         db.clone(),
         Dispatcher::new(WebhookConfig::default()).unwrap(),

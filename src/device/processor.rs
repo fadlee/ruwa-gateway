@@ -85,6 +85,7 @@ pub(super) struct MediaSettings {
     pub auto_mark_read: bool,
     /// `WHATSAPP_AUTO_REPLY` text; empty disables it.
     pub auto_reply: String,
+    pub presence_on_connect: String,
 }
 
 pub(super) async fn run(
@@ -146,6 +147,7 @@ async fn handle(
             tracing::warn!(device = %device.id(), error = %e.error, "pairing failed");
         }
         Event::Connected(_) => {
+            super::presence::send_on_connect(device, &media.presence_on_connect).await;
             if let Some(pn) = device.client().and_then(|c| c.pn()) {
                 let jid = pn.to_non_ad().to_string();
                 if device.jid().as_deref() != Some(jid.as_str()) {

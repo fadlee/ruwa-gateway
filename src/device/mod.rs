@@ -11,6 +11,7 @@ mod backfill;
 pub mod hub;
 mod ingest;
 mod instance;
+pub mod presence;
 mod processor;
 
 use std::{
@@ -55,6 +56,7 @@ pub struct DeviceOptions {
     pub auto_mark_read: bool,
     /// `WHATSAPP_AUTO_REPLY` text; empty disables it.
     pub auto_reply: String,
+    pub presence: presence::PresenceOptions,
 }
 
 pub struct DeviceManager {
@@ -121,6 +123,7 @@ impl DeviceManager {
                 auto_reject_call: manager.opts.auto_reject_call,
                 auto_mark_read: manager.opts.auto_mark_read,
                 auto_reply: manager.opts.auto_reply.clone(),
+                presence_on_connect: manager.opts.presence.on_connect.clone(),
             },
             manager.hub.clone(),
         ));

@@ -88,6 +88,40 @@ pub struct Config {
     )]
     pub webhook_insecure_skip_verify: bool,
 
+    /// Presence to send on connect: `available`, `unavailable` or `none`.
+    #[arg(
+        long = "presence-on-connect",
+        env = "WHATSAPP_PRESENCE_ON_CONNECT",
+        default_value = "unavailable"
+    )]
+    pub presence_on_connect: String,
+
+    #[arg(
+        long = "presence-pulse-enabled",
+        env = "WHATSAPP_PRESENCE_PULSE_ENABLED",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub presence_pulse_enabled: bool,
+
+    /// How often a device is marked available (Go duration, e.g. `24h`).
+    #[arg(
+        long = "presence-pulse-interval",
+        env = "WHATSAPP_PRESENCE_PULSE_INTERVAL",
+        default_value = "24h",
+        value_parser = parse_go_duration
+    )]
+    pub presence_pulse_interval: std::time::Duration,
+
+    /// How long a pulse keeps the device available.
+    #[arg(
+        long = "presence-pulse-duration",
+        env = "WHATSAPP_PRESENCE_PULSE_DURATION",
+        default_value = "5m",
+        value_parser = parse_go_duration
+    )]
+    pub presence_pulse_duration: std::time::Duration,
+
     #[arg(long = "auto-reply", env = "WHATSAPP_AUTO_REPLY", default_value = "")]
     pub auto_reply: String,
 
@@ -192,6 +226,42 @@ impl Config {
     }
 }
 
+/// Go `time.ParseDuration` subset: a sequence of `<number><unit>` with units
+/// `h`, `m`, `s`, `ms`. Zero or negative is rejected (GOWA ignores it and
+/// keeps its default; refusing it is clearer).
+pub fn parse_go_duration(raw: &str) -> Result<std::time::Duration, String> {
+    let bad = || format!("invalid duration {raw:?} (examples: 30s, 5m, 24h, 1h30m)");
+    let mut rest = raw.trim();
+    if rest.is_empty() {
+        return Err(bad());
+    }
+    let mut total = 0f64;
+    while !rest.is_empty() {
+        let end = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .ok_or_else(bad)?;
+        let value: f64 = rest[..end].parse().map_err(|_| bad())?;
+        rest = &rest[end..];
+        let (unit, len) = if rest.starts_with("ms") {
+            (0.001, 2)
+        } else if rest.starts_with('h') {
+            (3600.0, 1)
+        } else if rest.starts_with('m') {
+            (60.0, 1)
+        } else if rest.starts_with('s') {
+            (1.0, 1)
+        } else {
+            return Err(bad());
+        };
+        total += value * unit;
+        rest = &rest[len..];
+    }
+    if total <= 0.0 {
+        return Err(bad());
+    }
+    Ok(std::time::Duration::from_secs_f64(total))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +307,30 @@ mod tests {
             "/gowa"
         );
         assert_eq!(cfg(&[]).normalized_base_path(), "");
+    }
+
+    #[test]
+    fn go_durations() {
+        use std::time::Duration;
+        assert_eq!(
+            parse_go_duration("24h").unwrap(),
+            Duration::from_secs(86_400)
+        );
+        assert_eq!(parse_go_duration("5m").unwrap(), Duration::from_secs(300));
+        assert_eq!(
+            parse_go_duration("1h30m").unwrap(),
+            Duration::from_secs(5_400)
+        );
+        assert_eq!(
+            parse_go_duration("1.5s").unwrap(),
+            Duration::from_millis(1_500)
+        );
+        assert_eq!(
+            parse_go_duration("250ms").unwrap(),
+            Duration::from_millis(250)
+        );
+        for bad in ["", "5", "m", "0s", "5x", "-1m"] {
+            assert!(parse_go_duration(bad).is_err(), "{bad}");
+        }
     }
 }

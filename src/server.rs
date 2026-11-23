@@ -5,7 +5,7 @@ use tokio::net::TcpListener;
 
 use crate::{
     config::Config,
-    device::{DeviceManager, DeviceOptions},
+    device::{DeviceManager, DeviceOptions, presence::PresenceOptions},
     http::{self, AppState, Settings},
     storage::Db,
     ui::{UiAsset, UiConfig},
@@ -23,6 +23,12 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         insecure_skip_verify: cfg.webhook_insecure_skip_verify,
     })?;
     let db = Db::open(&cfg.db_uri)?;
+    let presence_opts = PresenceOptions {
+        on_connect: cfg.presence_on_connect.clone(),
+        pulse_enabled: cfg.presence_pulse_enabled,
+        pulse_interval: cfg.presence_pulse_interval,
+        pulse_duration: cfg.presence_pulse_duration,
+    };
     let devices = DeviceManager::bootstrap(
         DeviceOptions {
             root: PathBuf::from("storages/devices"),
@@ -33,11 +39,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             auto_reject_call: cfg.auto_reject_call,
             auto_mark_read: cfg.auto_mark_read,
             auto_reply: cfg.auto_reply.clone(),
+            presence: presence_opts.clone(),
         },
         db,
         webhook,
     )
     .await?;
+
+    crate::device::presence::start_pulse(devices.clone(), presence_opts);
 
     let ui = UiAsset::new(UiConfig {
         enabled: cfg.ui_enabled,

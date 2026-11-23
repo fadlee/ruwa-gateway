@@ -161,7 +161,7 @@ const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANU
     .remove(b'@');
 
 /// GOWA `publicStaticPath`: `/statics/...` for a file under `statics/`.
-fn public_static_path(file_path: &str) -> Option<String> {
+pub(super) fn public_static_path(file_path: &str) -> Option<String> {
     let normalized = file_path.replace('\\', "/");
     let rel = normalized.strip_prefix("statics/")?;
     let parts: Vec<&str> = rel

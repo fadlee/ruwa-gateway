@@ -6,6 +6,7 @@ pub mod chat;
 pub mod devices;
 pub mod group;
 pub mod message;
+pub mod newsletter;
 pub mod send;
 pub mod user;
 pub mod ws;

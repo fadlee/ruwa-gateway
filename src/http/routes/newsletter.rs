@@ -1,0 +1,89 @@
+//! `/newsletter/*` endpoints (GOWA `ui/rest/newsletter.go`).
+
+use axum::{
+    Extension, Router,
+    extract::{Path, Query, State},
+    http::{HeaderMap, header::HOST},
+    response::Response,
+    routing::{get, post},
+};
+
+use super::message::public_static_path;
+use crate::{
+    error::ApiResult,
+    http::{AppState, device_scope::Device, extract::Body, response},
+    usecase::newsletter::{self, IdRequest, InfoQuery, MessagesQuery},
+};
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/newsletter/follow", post(follow))
+        .route("/newsletter/unfollow", post(unfollow))
+        .route("/newsletter/info", get(info))
+        .route("/newsletter/messages", get(messages))
+        .route("/newsletter/messages/{server_id}/download", get(download))
+}
+
+async fn follow(
+    Extension(Device(device)): Extension<Device>,
+    Body(req): Body<IdRequest>,
+) -> ApiResult<Response> {
+    newsletter::follow(&device, req).await?;
+    Ok(response::success(
+        "Success follow newsletter",
+        serde_json::Value::Null,
+    ))
+}
+
+async fn unfollow(
+    Extension(Device(device)): Extension<Device>,
+    Body(req): Body<IdRequest>,
+) -> ApiResult<Response> {
+    newsletter::unfollow(&device, req).await?;
+    Ok(response::success(
+        "Success unfollow newsletter",
+        serde_json::Value::Null,
+    ))
+}
+
+async fn info(
+    Extension(Device(device)): Extension<Device>,
+    Query(q): Query<InfoQuery>,
+) -> ApiResult<Response> {
+    let res = newsletter::info(&device, q).await?;
+    Ok(response::success("Success get newsletter info", res))
+}
+
+async fn messages(
+    Extension(Device(device)): Extension<Device>,
+    Query(q): Query<MessagesQuery>,
+) -> ApiResult<Response> {
+    let res = newsletter::messages(&device, q).await?;
+    Ok(response::success("Success get newsletter messages", res))
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct DownloadQuery {
+    newsletter_id: String,
+}
+
+async fn download(
+    State(state): State<AppState>,
+    Extension(Device(device)): Extension<Device>,
+    Path(server_id): Path<String>,
+    Query(q): Query<DownloadQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let media_dir = state.devices.options().media_dir.clone();
+    let mut res =
+        newsletter::download_media(&device, &server_id, &q.newsletter_id, &media_dir).await?;
+    if let Some(path) = public_static_path(&res.file_path) {
+        let host = headers
+            .get(HOST)
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("localhost");
+        res.file_url = format!("http://{host}{}{path}", state.settings.base_path);
+    }
+    Ok(response::success(res.status.clone(), res))
+}

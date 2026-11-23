@@ -6,8 +6,8 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence|poll` selesai; `/user/*`, `/call/reject`, `call.offer` + auto-reject selesai; auto reply + auto mark read selesai; event `presence` + presence on-connect/pulse selesai; semua event webhook Fase 3 + error 463 selesai → **Fase 3 tuntas (kode)**; berikutnya verifikasi live, lalu Fase 4.
-- **Build**: `cargo test` (178 test: 134 unit + 44 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Fase aktif**: Fase 4 dimulai — `/newsletter/follow|unfollow|info|messages|messages/{id}/download` selesai (sisa newsletter: message-updates, directory, live-updates, event `newsletter.*`). Sebelumnya: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence|poll` selesai; `/user/*`, `/call/reject`, `call.offer` + auto-reject selesai; auto reply + auto mark read selesai; event `presence` + presence on-connect/pulse selesai; semua event webhook Fase 3 + error 463 selesai → **Fase 3 tuntas (kode)**; berikutnya verifikasi live, lalu Fase 4.
+- **Build**: `cargo test` (181 test: 136 unit + 45 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -91,6 +91,7 @@
 
 ## Catatan / jebakan
 
+- Newsletter: `follow`/`unfollow` = `newsletter().join/leave`; `info` lewat id atau `invite` (awalan `https://whatsapp.com/channel/` dibuang); `messages` = `get_messages(count, before)`; `download` mengambil 1 pesan (`before = server_id+1`) lalu `client.download` — **belum pasti** SDK mengunduh media saluran tanpa `media_key` (plaintext) dengan benar, uji live. `file_url` selalu ada (path `statics/...`). Validasi: `newsletter_id` wajib + harus berakhiran `@newsletter` (unfollow hanya wajib), `count` 1–100 (default 50), `before` ≥ 0, int query tak valid → 500 (Fiber). Belum ada: `message-updates` (SDK tak punya IQ-nya; perlu IQ sendiri), `directory` (query WA Web tak terdokumentasi), `live-updates` (+ renew 90 dtk) dan event `newsletter.*`. Fallback info tanpa viewer metadata (405 untuk saluran yang tak diikuti) belum ada — bergantung perilaku `get_metadata`. `status` pesan `/send/*` ke saluran masih upload biasa.
 - Nack kirim (463 dst.): whatsapp-rust kembali dari `send` sebelum server menjawab; jawabannya datang sebagai `Event::ServerAck` (`class=message`, `error=Some(code)`). `device/acks.rs` (`AckBook`, 512 id terakhir per device) menyimpannya dan `usecase::send::deliver` menunggu verdict id-nya **maks 5 dtk** (whatsmeow menunggu ack penuh): `463` → 429 `WA_REACHOUT_TIMELOCK` (teks GOWA), kode lain → 500 `server returned error N`; nack → pesan **tidak** disimpan. Tanpa ack dalam 5 dtk → dianggap sukses. Efek samping: tiap kirim kini menunggu ack (biasanya ratusan ms). Ack juga membawa timestamp server (belum dipakai untuk `status` kirim — gap lama).
 - `device.reachout_timelock`: `ends_at` dari `time_enforcement_ends` (detik unix, string), dikirim juga ke WS `DEVICE_REACHOUT_TIMELOCK`.
 - Label: `label.edit` dari `LabelEditUpdate`, `label.association` dari `LabelAssociationUpdate` (hanya level chat; per-pesan `MessageLabelAssociationUpdate` sengaja tak diteruskan, sama dengan GOWA). Hanya field yang dikirim WhatsApp yang muncul. `predefined_id` dikirim sebagai **angka** (int32, perilaku kode GOWA) walau contoh dokumen menulis string `"1"`. `timestamp` = `action_timestamp` bila ada, selain itu waktu proses.
@@ -153,6 +154,9 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — Fase 4: `/newsletter/*` (bagian 1)
+- `usecase/newsletter.rs`, `http/routes/newsletter.rs`; `user::newsletter_value` diekstrak dari `my_newsletters` agar dipakai bersama. Test: `newsletter_contract` (validasi, 500 int, 401), unit `id_validation_messages`, `query_ints_like_fiber`. Belum diuji dengan akun live (cek: info via id & invite, messages, download media saluran, follow/unfollow).
 
 ### 2026-11-24 — Checklist uji manual
 - `docs/MANUAL-TEST.md`: persiapan (2 akun, grup test, webhook.site), 9 bagian berurutan (pair, chat storage, kirim, webhook masuk, `/message/*`, `/group/*`, `/user/*`, event lain, multi-device/logout) + tabel temuan. Belum dijalankan.

@@ -831,12 +831,49 @@ fn newsletter_json(c: &ChannelView<'_>) -> Value {
     })
 }
 
+/// One channel as whatsmeow's `types.NewsletterMetadata` JSON.
+pub(crate) fn newsletter_value(c: &crate::wa::sdk::NewsletterMetadata) -> Value {
+    use crate::wa::sdk::{NewsletterRole, NewsletterState, features::NewsletterVerification};
+    let state = match &c.state {
+        NewsletterState::Active => "active".to_owned(),
+        NewsletterState::Suspended => "suspended".to_owned(),
+        NewsletterState::Geosuspended => "geosuspended".to_owned(),
+        NewsletterState::Other(s) => s.to_lowercase(),
+        _ => String::new(),
+    };
+    let verification = match &c.verification {
+        NewsletterVerification::Verified => "verified".to_owned(),
+        NewsletterVerification::Unverified => "unverified".to_owned(),
+        NewsletterVerification::Other(s) => s.to_lowercase(),
+        _ => String::new(),
+    };
+    let role = c.role.as_ref().map(|r| match r {
+        NewsletterRole::Owner => "owner",
+        NewsletterRole::Admin => "admin",
+        NewsletterRole::Subscriber => "subscriber",
+        _ => "guest",
+    });
+    let mute = c.muted.map(|m| if m { "on" } else { "off" });
+    newsletter_json(&ChannelView {
+        id: c.jid.to_string(),
+        state: &state,
+        creation_time: c.creation_time,
+        invite: c.invite_code.as_deref().unwrap_or_default(),
+        name: &c.name,
+        description: c.description.as_deref().unwrap_or_default(),
+        subscribers: c.subscriber_count,
+        verification: &verification,
+        picture_url: c.picture_url.as_deref(),
+        preview_url: c.preview_url.as_deref(),
+        mute,
+        role,
+    })
+}
+
 /// `GET /user/my/newsletters` (GOWA `MyListNewsletter`): subscribed channels,
 /// filling a missing subscriber count with one detail query (5 at a time,
 /// 5 s each; GOWA runs a sliding window, we run batches of 5).
 pub async fn my_newsletters(device: &DeviceInstance) -> ApiResult<Value> {
-    use crate::wa::sdk::{NewsletterRole, NewsletterState, features::NewsletterVerification};
-
     let client = must_login(device)?;
     let mut channels = client
         .newsletter()
@@ -876,45 +913,7 @@ pub async fn my_newsletters(device: &DeviceInstance) -> ApiResult<Value> {
         channels[i].subscriber_count = count;
     }
 
-    let rows: Vec<Value> = channels
-        .iter()
-        .map(|c| {
-            let state = match &c.state {
-                NewsletterState::Active => "active".to_owned(),
-                NewsletterState::Suspended => "suspended".to_owned(),
-                NewsletterState::Geosuspended => "geosuspended".to_owned(),
-                NewsletterState::Other(s) => s.to_lowercase(),
-                _ => String::new(),
-            };
-            let verification = match &c.verification {
-                NewsletterVerification::Verified => "verified".to_owned(),
-                NewsletterVerification::Unverified => "unverified".to_owned(),
-                NewsletterVerification::Other(s) => s.to_lowercase(),
-                _ => String::new(),
-            };
-            let role = c.role.as_ref().map(|r| match r {
-                NewsletterRole::Owner => "owner",
-                NewsletterRole::Admin => "admin",
-                NewsletterRole::Subscriber => "subscriber",
-                _ => "guest",
-            });
-            let mute = c.muted.map(|m| if m { "on" } else { "off" });
-            newsletter_json(&ChannelView {
-                id: c.jid.to_string(),
-                state: &state,
-                creation_time: c.creation_time,
-                invite: c.invite_code.as_deref().unwrap_or_default(),
-                name: &c.name,
-                description: c.description.as_deref().unwrap_or_default(),
-                subscribers: c.subscriber_count,
-                verification: &verification,
-                picture_url: c.picture_url.as_deref(),
-                preview_url: c.preview_url.as_deref(),
-                mute,
-                role,
-            })
-        })
-        .collect();
+    let rows: Vec<Value> = channels.iter().map(newsletter_value).collect();
     Ok(data_or_null(rows))
 }
 

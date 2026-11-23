@@ -1518,3 +1518,93 @@ async fn call_reject_contract() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["code"], "AUTHENTICATION_ERROR");
 }
+
+#[tokio::test]
+async fn newsletter_contract() {
+    let h = harness().await;
+    expect_validation(
+        &h,
+        post_json("/newsletter/follow", "{}"),
+        "newsletter_id: cannot be blank.",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json(
+            "/newsletter/follow",
+            r#"{"newsletter_id":"628@s.whatsapp.net"}"#,
+        ),
+        "newsletter_id: must end with @newsletter.",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json("/newsletter/unfollow", "{}"),
+        "newsletter_id: cannot be blank.",
+    )
+    .await;
+    for (path, msg) in [
+        (
+            "/newsletter/info",
+            "exactly one of newsletter_id or invite must be provided.",
+        ),
+        (
+            "/newsletter/info?newsletter_id=1@newsletter&invite=abc",
+            "exactly one of newsletter_id or invite must be provided.",
+        ),
+        (
+            "/newsletter/info?newsletter_id=628@s.whatsapp.net",
+            "newsletter_id: must end with @newsletter.",
+        ),
+        ("/newsletter/messages", "newsletter_id: cannot be blank."),
+        (
+            "/newsletter/messages?newsletter_id=1@newsletter&count=101",
+            "count: must be no greater than 100.",
+        ),
+        (
+            "/newsletter/messages?newsletter_id=1@newsletter&count=-1",
+            "count: must be no less than 1.",
+        ),
+        (
+            "/newsletter/messages/0/download?newsletter_id=1@newsletter",
+            "server_id: must be no less than 1.",
+        ),
+        (
+            "/newsletter/messages/abc/download?newsletter_id=1@newsletter",
+            "server_id: must be a valid integer.",
+        ),
+    ] {
+        let (status, body) = call(&h.app, get(path)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(body["message"], msg, "{path}");
+    }
+    let (status, _) = call(
+        &h.app,
+        get("/newsletter/messages?newsletter_id=1@newsletter&count=x"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "bad int binds as 500"
+    );
+    for (method_get, path) in [
+        (true, "/newsletter/info?newsletter_id=1@newsletter"),
+        (true, "/newsletter/messages?newsletter_id=1@newsletter"),
+        (
+            true,
+            "/newsletter/messages/5/download?newsletter_id=1@newsletter",
+        ),
+        (false, "/newsletter/follow"),
+        (false, "/newsletter/unfollow"),
+    ] {
+        let req = if method_get {
+            get(path)
+        } else {
+            post_json(path, r#"{"newsletter_id":"1@newsletter"}"#)
+        };
+        let (status, body) = call(&h.app, req).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        assert_eq!(body["code"], "AUTHENTICATION_ERROR", "{path}");
+    }
+}

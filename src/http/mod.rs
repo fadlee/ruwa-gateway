@@ -57,6 +57,7 @@ pub fn router(state: AppState) -> Router {
 
     let scoped = routes::app::scoped()
         .merge(routes::chat::router())
+        .merge(routes::message::router())
         .merge(routes::send::router())
         .merge(routes::user::router())
         .merge(routes::ws::router())

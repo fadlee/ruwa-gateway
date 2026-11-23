@@ -21,7 +21,7 @@ use std::{
 
 use tokio::sync::{RwLock, mpsc};
 
-pub use ingest::store_sent;
+pub use ingest::{store_own_edit, store_sent};
 pub use instance::{DeviceInstance, PairCode, QrCode};
 
 use crate::{

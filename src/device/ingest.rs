@@ -353,6 +353,54 @@ pub async fn store_sent(
         .await
 }
 
+/// Mirror an edit this account sent through the API (GOWA
+/// `updateStoredMessage`): the edit is never echoed back, so nothing else
+/// would apply it to the stored copy.
+#[allow(clippy::too_many_arguments)]
+pub async fn store_own_edit(
+    store: &ChatStore,
+    key: &str,
+    own: &str,
+    chat: &Jid,
+    original: &str,
+    edit_id: &str,
+    text: &str,
+    timestamp: i64,
+) -> anyhow::Result<()> {
+    let chat = chat.to_non_ad().to_string();
+    let stub = Message {
+        id: original.to_owned(),
+        chat_jid: chat.clone(),
+        device_id: key.to_owned(),
+        sender: own.to_owned(),
+        content: text.to_owned(),
+        timestamp,
+        is_from_me: true,
+        ..Default::default()
+    };
+    store
+        .apply_edit(
+            MessageEdit {
+                original_message_id: original.to_owned(),
+                edit_event_id: edit_id.to_owned(),
+                chat_jid: chat,
+                device_id: key.to_owned(),
+                editor: own.to_owned(),
+                new_content: text.to_owned(),
+                edited_at: timestamp,
+                ..Default::default()
+            },
+            String::new(),
+            Some(stub),
+            {
+                let own = own.to_owned();
+                move |stored| author_matches(&stored.sender, stored.is_from_me, &own, "", true)
+            },
+        )
+        .await?;
+    Ok(())
+}
+
 /// GOWA `handleArchive`: only chats already stored are updated.
 pub async fn store_archive<R: Resolver>(
     store: &ChatStore,

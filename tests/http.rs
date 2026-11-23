@@ -952,3 +952,110 @@ async fn chat_actions_validate_then_need_login() {
     let (status, _) = call(&h.app, post_json(&format!("/chat/{jid}/history"), "")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+// ---- /message/{id}/* ----
+
+#[tokio::test]
+async fn message_endpoints_validate_then_need_login() {
+    let h = harness().await;
+    seed_chats(&h).await;
+    for action in [
+        "reaction", "revoke", "delete", "update", "read", "played", "star", "unstar", "forward",
+    ] {
+        let (status, body) = call(&h.app, post_json(&format!("/message/M1/{action}"), "{}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{action}");
+        assert_eq!(body["code"], "VALIDATION_ERROR");
+        let expected = if action == "update" {
+            "message: cannot be blank; phone: cannot be blank."
+        } else {
+            "phone: cannot be blank."
+        };
+        assert_eq!(body["message"], expected, "{action}");
+    }
+    let (status, _) = call(&h.app, get("/message/M1/download")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Valid requests reach MustLogin.
+    for action in [
+        "reaction", "revoke", "delete", "read", "played", "star", "unstar",
+    ] {
+        let (status, body) = call(
+            &h.app,
+            post_json(
+                &format!("/message/M1/{action}"),
+                r#"{"phone":"628222","emoji":"👍"}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{action}");
+        assert_eq!(body["code"], "AUTHENTICATION_ERROR");
+    }
+    let (status, _) = call(&h.app, get("/message/M1/download?phone=628222")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A malformed body is a 500, like GOWA's panic on Bind().Body.
+    let (status, body) = call(&h.app, post_json("/message/M1/revoke", "{")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["code"], "INTERNAL_SERVER_ERROR");
+}
+
+#[tokio::test]
+async fn message_update_validation() {
+    let h = harness().await;
+    let cases = [
+        (
+            r#"{"phone":"628","message":"x","link":"nope"}"#,
+            "link: must be a valid URL.",
+        ),
+        (
+            r#"{"phone":"628","message":"x","media_type":"video"}"#,
+            "media_type: must be a valid value.",
+        ),
+        (
+            r#"{"phone":"628","message":"x","media_type":"image","link":"https://a.b"}"#,
+            "link: cannot be combined with media_type.",
+        ),
+    ];
+    for (body, message) in cases {
+        let (status, res) = call(&h.app, post_json("/message/M1/update", body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(res["message"], message);
+    }
+}
+
+#[tokio::test]
+async fn message_forward_checks_storage_first() {
+    use ruwa_gateway::storage::chat::{ChatStore, Message};
+    let h = harness().await;
+    seed_chats(&h).await;
+    ChatStore::new(h.db.clone())
+        .store_message(Message {
+            id: "C1".into(),
+            chat_jid: "628222@s.whatsapp.net".into(),
+            device_id: "default".into(),
+            sender: "628222@s.whatsapp.net".into(),
+            content: "Contact: Bob (62)".into(),
+            timestamp: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let forward = |id: &str, body: &str| post_json(&format!("/message/{id}/forward"), body);
+
+    let (status, body) = call(&h.app, forward("NOPE", r#"{"phone":"628333"}"#)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["message"], "message with ID NOPE not found");
+    let (status, body) = call(&h.app, forward("C1", r#"{"phone":"628333"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["message"], "unsupported message type for forward");
+    let (status, body) = call(&h.app, forward("M1", r#"{"phone":"628333","duration":5}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("duration must be one of")
+    );
+    let (status, _) = call(&h.app, forward("M1", r#"{"phone":"628333"}"#)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

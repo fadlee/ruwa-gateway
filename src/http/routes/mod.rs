@@ -3,6 +3,7 @@
 pub mod app;
 pub mod chat;
 pub mod devices;
+pub mod message;
 pub mod send;
 pub mod user;
 pub mod ws;

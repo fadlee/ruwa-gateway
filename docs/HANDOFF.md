@@ -6,8 +6,8 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 3 — chat storage + `/chats`, `/chat/{jid}/*` selesai; berikutnya `/message/{id}/*`.
-- **Build**: `cargo test` (116 test: 87 unit + 29 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*` selesai; berikutnya `/group/*`.
+- **Build**: `cargo test` (125 test: 93 unit + 32 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -15,7 +15,8 @@
 - **Belum terverifikasi live**: kirim media (upload ke CDN WhatsApp), webhook pesan masuk/media/receipt/presence,
   auto-download, `/user/*`, logout dari HP (`device.logged_out`), temp ban, **chat storage** (history sync setelah
   pair, pesan masuk/keluar tersimpan, reply setelah restart), `/chat/{jid}/pin|archive|disappearing|history`
-  (app-state/protocol ke WhatsApp), nama dari `ContactUpdate`. Cek via gowa-ui menu Chats atau `GET /chats`.
+  (app-state/protocol ke WhatsApp), nama dari `ContactUpdate`, semua `/message/{id}/*` (revoke/edit/reaction/read/
+  played/star/delete-for-me/forward/download). Cek via gowa-ui menu Chats atau `GET /chats`.
 - **whatsapp-rust rev**: `94877bedb6cd473864f9f6b332a5c13d5fbef789`
 - **GOWA acuan**: `3744c92a24fa0806c68df9bf6a34db4340016e10` (snapshot di `docs/upstream/`)
 
@@ -42,9 +43,8 @@
    Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
    `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
    `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
-2. Fase 3 lanjutan: `/message/{id}/revoke|delete|reaction|update|read|played|star|unstar|forward|download`
-   (GOWA `usecase/message.go`; storage sudah punya `get_message_in_chat`, `delete_message`, `apply_edit`), lalu
-   `/group/*`, sisa `/user/*`, sticker/poll/presence, event grup/label/call.
+2. Fase 3 lanjutan: `/group/*` (GOWA `usecase/group.go`, whatsapp-rust `client.groups()`), lalu sisa `/user/*`,
+   sticker/poll/presence, event grup/label/call, auto reply/mark read/reject call.
 
 ## Keputusan yang sudah diambil
 
@@ -77,6 +77,8 @@
 | 2026-11-23 | Kebijakan nama di `usecase/names.rs` (fungsi murni) dipakai `/chats`, `/chat/*/messages`, dan `sender_display_name` webhook | satu sumber, port `ChatDisplayNameResolver` + `SenderDisplayNameResolver` |
 | 2026-11-23 | Endpoint `/chat/*`: body gagal bind → 400 `BAD_REQUEST` `Invalid request body`; query tak valid → default | perilaku handler GOWA `ui/rest/chat.go` + Fiber `Query[T]` (beda dengan `/send/*`) |
 | 2026-11-23 | Timestamp response chat = RFC3339 UTC; unix 0 → `0001-01-01T00:00:00Z` | GOWA `formatTimestamp` (zero time); `APP_TIMEZONE` belum didukung |
+| 2026-11-23 | `/message/*/delete` & `star`: `from_me`/author diambil dari salinan tersimpan, heuristik GOWA (id > 22 char = bukan dari saya) hanya bila tidak tersimpan | heuristik GOWA salah untuk id pendek dari klien lain; index app-state mengikuti whatsapp-rust (WA Web) |
+| 2026-11-23 | Read/played receipt 1:1 tanpa `participant` | API whatsapp-rust (`sender` hanya untuk grup); whatsmeow juga mengabaikan sender di DM |
 
 ## Catatan / jebakan
 
@@ -95,7 +97,10 @@
   - Teks chat storage belum meringkas pesan bisnis (template/interactive/list/buttons/product/order) — GOWA ya.
   - Panggilan masuk belum disimpan sebagai baris `media_type = call` (`CreateIncomingCallRecord`) → bersama `call.offer`.
   - History sync tidak ditulis ke file JSON `storages/history-*.json` seperti GOWA (hanya ke DB).
-  - Media yang di-reupload HP (`UpdateMessageMedia`) belum ada → bersama `/message/{id}/download`.
+  - Media kedaluwarsa (403/404/410) tidak diminta ulang dari HP (`ExpiredMediaRecovery`, `UpdateMessageMedia`) —
+    download/forward re-upload gagal dengan pesan error biasa.
+  - `/message/*/download`: `file_url` selalu `http://<Host>`; GOWA memakai skema Fiber (https bila TLS/proxy tepercaya).
+  - Forward: field jadwal (`scheduled_at`, dll.) diabaikan → Fase 4.
   - Error 463 (reach-out timelock) belum dipetakan ke `WA_REACHOUT_TIMELOCK`; di whatsapp-rust 463 datang
     lewat ack server, bukan `SendError` → perlu riset.
   - `allow_reshare` divalidasi tapi flag reshare belum dipasang ke pesan status.
@@ -118,6 +123,15 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-23 — Fase 3: `/message/{id}/*`
+- `usecase/message.rs` + `http/routes/message.rs`: reaction (key ala `BuildMessageKey`), revoke (sender/admin dari salinan
+  tersimpan, lalu hapus lokal), delete-for-me & star/unstar (app state), update (teks, caption image/document, link
+  preview; edit dicerminkan ke storage via `ingest::store_own_edit`), read (grup butuh pengirim tersimpan), played
+  (hanya audio masuk), forward (CDN blob lama, re-upload bila gagal/`force_reupload`, timer chat tersimpan), download
+  (`statics/media/<phone>/<tanggal>/<unix>-<uuid><ext>` + `file_url`).
+- `send_media.rs`: `link_preview_message` dan `upload` dibuka untuk dipakai ulang.
+- Contract test: validasi semua endpoint, 401 sebelum login, body rusak → 500, forward cek storage dulu.
 
 ### 2026-11-23 — Fase 3: `/chats`, `/chat/{jid}/*`
 - `usecase/chat.rs` + `http/routes/chat.rs`: list chats (filter search/has_media/archived, pagination total terfilter),

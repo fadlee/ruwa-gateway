@@ -142,7 +142,7 @@ pub struct SendSettings {
     pub account_validation: bool,
 }
 
-fn is_url(s: &str) -> bool {
+pub(crate) fn is_url(s: &str) -> bool {
     reqwest::Url::parse(s)
         .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some())
 }
@@ -202,7 +202,7 @@ async fn prologue(
     Ok((client, recipient))
 }
 
-async fn upload(
+pub(crate) async fn upload(
     client: &Client,
     bytes: Vec<u8>,
     kind: MediaType,
@@ -691,6 +691,22 @@ pub async fn send_location(
     })
 }
 
+/// GOWA `buildLinkPreviewMessage` (inline JPEG thumbnail only).
+pub(crate) async fn link_preview_message(text: &str, link: &str) -> ApiResult<proto::Message> {
+    let (preview, thumbnail) = fetch::link_preview(link)
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to fetch link preview: {e}")))?;
+    let mut ext = proto::message::ExtendedTextMessage::default();
+    ext.text = Some(text.to_owned());
+    ext.title = Some(preview.title);
+    ext.matched_text = Some(link.to_owned());
+    ext.description = Some(preview.description);
+    ext.jpeg_thumbnail = thumbnail;
+    let mut message = proto::Message::default();
+    message.extended_text_message = sdk::waproto::buffa::MessageField::some(ext);
+    Ok(message)
+}
+
 pub async fn send_link(
     device: &DeviceInstance,
     mut req: LinkRequest,
@@ -716,22 +732,13 @@ pub async fn send_link(
     } else {
         format!("{caption}\n{link}")
     };
-    let (preview, thumbnail) = fetch::link_preview(&link)
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to fetch link preview: {e}")))?;
-
-    let mut ext = proto::message::ExtendedTextMessage::default();
-    ext.text = Some(text.clone());
-    ext.title = Some(preview.title);
-    ext.matched_text = Some(link);
-    ext.description = Some(preview.description);
-    ext.jpeg_thumbnail = thumbnail;
+    let mut message = link_preview_message(&text, &link).await?;
     let ci = base_context(req.is_forwarded, req.duration);
-    if ci != proto::ContextInfo::default() {
+    if ci != proto::ContextInfo::default()
+        && let Some(ext) = message.extended_text_message.as_option_mut()
+    {
         ext.context_info = sdk::waproto::buffa::MessageField::some(ci);
     }
-    let mut message = proto::Message::default();
-    message.extended_text_message = sdk::waproto::buffa::MessageField::some(ext);
 
     let message_id = deliver(device, &client, &recipient, message, &text).await?;
     Ok(SendResponse {

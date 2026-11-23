@@ -4,6 +4,7 @@
 pub mod app;
 pub mod chat;
 pub mod device;
+pub mod message;
 pub mod names;
 pub mod send;
 pub mod send_media;

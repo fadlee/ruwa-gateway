@@ -48,7 +48,7 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 
 - [x] Chat storage (tabel meniru GOWA), isi dari pesan live + history sync
 - [x] `/chats`, `/chat/{jid}/*`
-- [ ] `/message/{id}/*` (revoke, delete, reaction, update, read, played, star, forward, download)
+- [x] `/message/{id}/*` (revoke, delete, reaction, update, read, played, star, forward, download)
 - [ ] Semua `/group/*`
 - [ ] Sisa `/user/*`, `/send/sticker|poll|presence|chat-presence`, `/call/reject`
 - [ ] Event: `message.deleted`, `presence`, `group.*`, `label.*`, `call.offer`, `device.reachout_timelock`

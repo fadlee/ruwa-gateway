@@ -274,7 +274,7 @@ pub async fn send_image(
     if !mentions.is_empty() {
         ci.mentioned_jid = mentions;
     }
-    merge_reply(device, &mut ci, req.reply_message_id.as_deref(), &recipient);
+    merge_reply(device, &mut ci, req.reply_message_id.as_deref(), &recipient).await;
 
     let (width, height, thumbnail, mime) = (
         prepared.width,
@@ -355,7 +355,7 @@ pub async fn send_file(
     if !mentions.is_empty() {
         ci.mentioned_jid = mentions;
     }
-    merge_reply(device, &mut ci, req.reply_message_id.as_deref(), &recipient);
+    merge_reply(device, &mut ci, req.reply_message_id.as_deref(), &recipient).await;
 
     let uploaded = upload(&client, raw.bytes, MediaType::Document).await?;
     let message = sdk::media::document_message(uploaded, {
@@ -470,7 +470,7 @@ pub async fn send_video(
     if !mentions.is_empty() {
         ci.mentioned_jid = mentions;
     }
-    merge_reply(device, &mut ci, req.reply_message_id.as_deref(), &recipient);
+    merge_reply(device, &mut ci, req.reply_message_id.as_deref(), &recipient).await;
 
     let uploaded = upload(&client, bytes, MediaType::Video).await?;
     let mut message = sdk::media::video_message(uploaded, {
@@ -572,7 +572,7 @@ pub async fn send_audio(
     }
 
     let mut ci = base_context(req.is_forwarded, req.duration);
-    merge_reply(device, &mut ci, req.reply_message_id.as_deref(), &recipient);
+    merge_reply(device, &mut ci, req.reply_message_id.as_deref(), &recipient).await;
     let uploaded = upload(&client, bytes, MediaType::Audio).await?;
     let message = sdk::media::audio_message(uploaded, {
         let mut o = AudioOptions::default();

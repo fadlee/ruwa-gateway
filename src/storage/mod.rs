@@ -1,9 +1,10 @@
-//! Application database (`storages/ruwa.db`): device registry now, chat
-//! storage in Fase 3. Diesel, sharing `libsqlite3-sys` with whatsapp-rust.
+//! Application database (`storages/ruwa.db`): device registry and chat
+//! storage. Diesel, sharing `libsqlite3-sys` with whatsapp-rust.
 //!
 //! Diesel is synchronous; the connection sits behind a mutex and every call
 //! runs on the blocking pool.
 
+pub mod chat;
 pub mod registry;
 
 use std::sync::{Arc, Mutex};

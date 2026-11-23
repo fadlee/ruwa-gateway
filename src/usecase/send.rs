@@ -7,7 +7,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    device::{DeviceInstance, RecentMessage},
+    device::DeviceInstance,
     error::{ApiError, ApiResult},
     wa::{
         Jid,
@@ -198,8 +198,8 @@ pub(crate) async fn resolve_mentions(
     out
 }
 
-/// GOWA `mergeReplyContext`: quote a known message; unknown ids are ignored.
-pub(crate) fn merge_reply(
+/// GOWA `mergeReplyContext`: quote a stored message; unknown ids are ignored.
+pub(crate) async fn merge_reply(
     device: &DeviceInstance,
     ci: &mut proto::ContextInfo,
     reply_id: Option<&str>,
@@ -208,18 +208,52 @@ pub(crate) fn merge_reply(
     let Some(id) = reply_id.filter(|id| !id.is_empty()) else {
         return;
     };
-    let Some(quoted) = device.recall(id) else {
-        tracing::warn!(
-            id,
-            "reply message not found, continuing without reply context"
-        );
-        return;
+    let quoted = match device
+        .chats()
+        .get_message(&device.storage_partition(), id)
+        .await
+    {
+        Ok(Some(quoted)) => quoted,
+        Ok(None) => {
+            tracing::warn!(
+                id,
+                "reply message not found in storage, continuing without reply context"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(id, %error, "error retrieving reply message, continuing without reply context");
+            return;
+        }
     };
     ci.stanza_id = Some(id.to_owned());
     ci.participant = Some(quoted.sender.clone());
-    ci.quoted_message = MessageField::some(msgx::conversation(quoted.text.clone()));
-    if quoted.chat.ends_with("@g.us") && quoted.chat != recipient.to_non_ad().to_string() {
-        ci.remote_jid = Some(quoted.chat.clone());
+    ci.quoted_message = MessageField::some(msgx::conversation(quoted.content.clone()));
+    if quoted.chat_jid.ends_with("@g.us") && quoted.chat_jid != recipient.to_non_ad().to_string() {
+        ci.remote_jid = Some(quoted.chat_jid.clone());
+    }
+}
+
+/// Keys a request's stored chat is looked up under (GOWA `chatKeys`): an
+/// `@lid` request reads its own row first, anything else the resolved JID.
+pub(crate) fn chat_keys(requested: &str, resolved: &Jid) -> Vec<String> {
+    let resolved = resolved.to_string();
+    if requested.ends_with("@lid") {
+        vec![requested.to_owned(), resolved]
+    } else {
+        vec![resolved, requested.to_owned()]
+    }
+}
+
+/// GOWA `getDefaultEphemeralExpiration`: the timer stored for this chat.
+pub(crate) async fn default_expiration(device: &DeviceInstance, keys: &[String]) -> u32 {
+    match device
+        .chats()
+        .first_chat(&device.storage_partition(), keys)
+        .await
+    {
+        Ok(Some(chat)) => chat.ephemeral_expiration.max(0) as u32,
+        _ => 0,
     }
 }
 
@@ -243,9 +277,11 @@ pub async fn send_text(
         ci.is_forwarded = Some(true);
         ci.forwarding_score = Some(100);
     }
-    if let Some(duration) = req.duration {
-        ci.expiration = Some(duration as u32);
-    }
+    // An explicit 0 turns expiry off; no duration uses the chat's timer.
+    ci.expiration = Some(match req.duration {
+        Some(duration) => duration as u32,
+        None => default_expiration(device, &chat_keys(&req.phone, &recipient)).await,
+    });
     let mentions = resolve_mentions(
         &client,
         &req.message,
@@ -257,7 +293,7 @@ pub async fn send_text(
     if !mentions.is_empty() {
         ci.mentioned_jid = mentions;
     }
-    merge_reply(device, &mut ci, req.reply_message_id.as_deref(), &recipient);
+    merge_reply(device, &mut ci, req.reply_message_id.as_deref(), &recipient).await;
     // TODO(Fase 4): status reshare flag for `allow_reshare` on status@broadcast.
 
     let message = msgx::extended_text(req.message.clone(), ci);
@@ -272,8 +308,9 @@ pub async fn send_text(
     })
 }
 
-/// Send and remember the message (for replies). `text` is what GOWA stores
-/// as the message content (body, caption, or an emoji label for media).
+/// Send, then store the message in chat storage (GOWA `wrapSendMessage`).
+/// `text` is what GOWA stores as the content (body, caption, or a label for
+/// media). A storage failure is logged; the message has already gone out.
 pub(crate) async fn deliver(
     device: &DeviceInstance,
     client: &Client,
@@ -282,18 +319,29 @@ pub(crate) async fn deliver(
     text: &str,
 ) -> ApiResult<String> {
     let sent = client
-        .send(SendRequest::new(recipient, message))
+        .send(SendRequest::new(recipient, message.clone()))
         .await
         .map_err(send_error)?;
     let message_id = sent.message_id.to_string();
-    device.remember(
-        message_id.clone(),
-        RecentMessage {
-            chat: recipient.to_non_ad().to_string(),
-            sender: device.jid().unwrap_or_default(),
-            text: text.to_owned(),
-        },
-    );
+    let own = client
+        .pn()
+        .map(|pn| pn.to_non_ad().to_string())
+        .or_else(|| device.jid())
+        .unwrap_or_default();
+    if let Err(error) = crate::device::store_sent(
+        device.chats(),
+        &device.storage_partition(),
+        &own,
+        recipient,
+        &message_id,
+        text,
+        crate::device::now(),
+        &message,
+    )
+    .await
+    {
+        tracing::warn!(id = %message_id, %error, "failed to store sent message");
+    }
     Ok(message_id)
 }
 

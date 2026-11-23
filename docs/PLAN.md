@@ -46,7 +46,7 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 
 ## Fase 3 — M3: chat storage, message ops, grup, user
 
-- [ ] Chat storage (tabel meniru GOWA), isi dari pesan live + history sync
+- [x] Chat storage (tabel meniru GOWA), isi dari pesan live + history sync
 - [ ] `/chats`, `/chat/{jid}/*`
 - [ ] `/message/{id}/*` (revoke, delete, reaction, update, read, played, star, forward, download)
 - [ ] Semua `/group/*`

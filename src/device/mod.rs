@@ -8,9 +8,9 @@
 //! at startup, so an unpaired slot never starts emitting QR codes on its own.
 
 pub mod hub;
+mod ingest;
 mod instance;
 mod processor;
-mod recent;
 
 use std::{
     collections::BTreeMap,
@@ -21,12 +21,16 @@ use std::{
 
 use tokio::sync::{RwLock, mpsc};
 
+pub use ingest::store_sent;
 pub use instance::{DeviceInstance, PairCode, QrCode};
-pub use recent::RecentMessage;
 
 use crate::{
     error::ApiError,
-    storage::registry::{DeviceRecord, Registry},
+    storage::{
+        Db,
+        chat::ChatStore,
+        registry::{DeviceRecord, Registry},
+    },
     webhook::Dispatcher,
 };
 
@@ -49,6 +53,7 @@ pub struct DeviceOptions {
 pub struct DeviceManager {
     opts: DeviceOptions,
     registry: Registry,
+    chats: ChatStore,
     devices: RwLock<BTreeMap<String, Arc<DeviceInstance>>>,
     events: mpsc::UnboundedSender<processor::Job>,
     hub: hub::Hub,
@@ -84,7 +89,7 @@ impl DeviceManager {
     /// event processor.
     pub async fn bootstrap(
         opts: DeviceOptions,
-        registry: Registry,
+        db: Db,
         webhook: Dispatcher,
     ) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(&opts.root)?;
@@ -94,7 +99,8 @@ impl DeviceManager {
         let (tx, rx) = mpsc::unbounded_channel();
         let manager = Arc::new(Self {
             opts,
-            registry,
+            registry: Registry::new(db.clone()),
+            chats: ChatStore::new(db),
             devices: RwLock::new(BTreeMap::new()),
             events: tx,
             hub: hub::Hub::default(),
@@ -129,7 +135,12 @@ impl DeviceManager {
 
     async fn attach(&self, record: &DeviceRecord) -> Arc<DeviceInstance> {
         let dir = self.opts.root.join(&record.storage_key);
-        let instance = Arc::new(DeviceInstance::new(record, dir, self.registry.clone()));
+        let instance = Arc::new(DeviceInstance::new(
+            record,
+            dir,
+            self.registry.clone(),
+            self.chats.clone(),
+        ));
         self.devices
             .write()
             .await
@@ -214,13 +225,33 @@ impl DeviceManager {
     }
 
     /// GOWA `PurgeDevice`: best-effort remote unlink, then delete the
-    /// session, the slot directory, and the registry row.
+    /// session, the slot directory, chat storage, and the registry row.
     pub async fn remove(&self, id_or_jid: &str) -> Result<(), ApiError> {
         let device = self
             .find(id_or_jid)
             .await
             .ok_or_else(|| ApiError::not_found("device not found"))?;
+        // Chats are partitioned by account JID once paired; keep that
+        // partition when another slot is linked to the same number.
+        let jid = device.jid();
         device.logout().await;
+        let mut partitions = vec![device.id().to_owned()];
+        if let Some(jid) = jid.filter(|j| j != device.id()) {
+            let shared = self
+                .devices
+                .read()
+                .await
+                .values()
+                .any(|d| d.id() != device.id() && d.jid().as_deref() == Some(jid.as_str()));
+            if !shared {
+                partitions.push(jid);
+            }
+        }
+        for partition in partitions {
+            if let Err(error) = self.chats.delete_device_data(&partition).await {
+                tracing::warn!(device = %device.id(), %partition, %error, "failed to delete chat storage");
+            }
+        }
         let _ = tokio::fs::remove_dir_all(device.dir()).await;
         self.devices.write().await.remove(device.id());
         self.registry

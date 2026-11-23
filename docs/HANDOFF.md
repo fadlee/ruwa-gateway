@@ -6,14 +6,15 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 2 (M2) selesai + gowa-ui + `/ws` (dari M4) → berikutnya Fase 3 (chat storage).
-- **Build**: `cargo test` (94 test: 68 unit + 26 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Fase aktif**: Fase 3 — chat storage selesai (kode + test); berikutnya endpoint `/chats`, `/chat/{jid}/*`.
+- **Build**: `cargo test` (108 test: 82 unit + 26 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
   gowa-ui terunduh & dirender, indikator `/ws` hijau di headless Chrome.
 - **Belum terverifikasi live**: kirim media (upload ke CDN WhatsApp), webhook pesan masuk/media/receipt/presence,
-  auto-download, `/user/*`, logout dari HP (`device.logged_out`), temp ban.
+  auto-download, `/user/*`, logout dari HP (`device.logged_out`), temp ban, **chat storage** (history sync setelah
+  pair, pesan masuk/keluar tersimpan, reply setelah restart). Cek via `sqlite3 storages/ruwa.db 'select * from chats'`.
 - **whatsapp-rust rev**: `94877bedb6cd473864f9f6b332a5c13d5fbef789`
 - **GOWA acuan**: `3744c92a24fa0806c68df9bf6a34db4340016e10` (snapshot di `docs/upstream/`)
 
@@ -40,9 +41,10 @@
    Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
    `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
    `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
-2. Fase 3: chat storage (diesel) → `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, sisa `/user/*`,
-   sticker/poll/presence, event grup/label/call. Chat storage juga menutup beberapa gap di bawah
-   (nama kontak, reply setelah restart, default ephemeral).
+2. Fase 3 lanjutan: `/chats` + `/chat/{jid}/messages|history|pin|disappearing|archive` di atas `storage::chat`
+   (query/filter/count sudah ada: `list_chats`, `count_chats`, `list_messages`, `search_messages`), lalu
+   `/message/{id}/*`, `/group/*`, sisa `/user/*`, sticker/poll/presence, event grup/label/call.
+   Cek format response GOWA `/chats` (timestamp RFC3339, field `reactions`) di `docs/upstream/openapi.yaml`.
 
 ## Keputusan yang sudah diambil
 
@@ -65,6 +67,12 @@
 | 2026-11-23 | gowa-ui disajikan di `{base}/` (di balik basic auth), diunduh dari release GitHub terbaru saat start, diverifikasi digest SHA-256, cache `storages/ui/index.html` (fitur M4 ditarik maju) | sarana uji manual; sama dengan GOWA v9 (`APP_UI_*`) |
 | 2026-11-23 | `/ws` = hub broadcast global (tokio `broadcast`, kapasitas 64; klien lambat diputus) | sama dengan GOWA: tidak di-scope per device; integrasi pakai webhook |
 | 2026-11-23 | `compress` gambar default `true` (JSON tanpa field / multipart), video default `false` | GOWA preset `Compress = true` hanya di handler image |
+| 2026-11-23 | Chat storage di `storages/ruwa.db` (migrasi `000002_chat_storage`); partisi `device_id` = JID akun (non-AD), fallback id slot | sama dengan GOWA (`deviceIDFromContext`) |
+| 2026-11-23 | Waktu di chat storage disimpan unix detik (BIGINT), bukan TIMESTAMP teks GOWA | internal; konversi ke RFC3339 di layer HTTP |
+| 2026-11-23 | Hanya query device-scoped yang diport (tanpa `GetChat`/`GetMessageByID` global GOWA) | AGENTS.md GOWA melarang lookup global untuk flow user |
+| 2026-11-23 | Cache `device/recent.rs` dihapus; reply mengutip dari chat storage | GOWA `mergeReplyContext` |
+| 2026-11-23 | `/send/message` tanpa `duration` mengirim `expiration` = timer chat tersimpan (atau 0) | GOWA `getDefaultEphemeralExpiration` (selalu set field) |
+| 2026-11-23 | Tabel chatwoot/poll/scheduled belum dibuat | dibuat saat fiturnya (poll Fase 3, schedule Fase 4; chatwoot di luar scope) |
 
 ## Catatan / jebakan
 
@@ -74,8 +82,13 @@
 - Server menulis ke `storages/` dan `statics/` **relatif terhadap cwd**. Untuk eksperimen jalankan dari
   direktori lain (di-gitignore, tapi tetap rapi).
 - Perbedaan perilaku dari GOWA yang disadari (belum ditutup):
-  - `sender_display_name` sementara = push name / user part JID (GOWA pakai kontak tersimpan dulu) → Fase 3.
-  - `duration` tidak dikirim bila tidak diisi; GOWA memakai default ephemeral chat dari storage → Fase 3.
+  - `sender_display_name` sementara = push name / user part JID (GOWA pakai contact store whatsmeow dulu) — belum
+    ditutup oleh chat storage; perlu contact store whatsapp-rust.
+  - Nama chat 1:1 dari history sync memakai `displayName` percakapan; GOWA lebih dulu tanya contact store.
+  - Teks chat storage belum meringkas pesan bisnis (template/interactive/list/buttons/product/order) — GOWA ya.
+  - Panggilan masuk belum disimpan sebagai baris `media_type = call` (`CreateIncomingCallRecord`) → bersama `call.offer`.
+  - History sync tidak ditulis ke file JSON `storages/history-*.json` seperti GOWA (hanya ke DB).
+  - Media yang di-reupload HP (`UpdateMessageMedia`) belum ada → bersama `/message/{id}/download`.
   - Error 463 (reach-out timelock) belum dipetakan ke `WA_REACHOUT_TIMELOCK`; di whatsapp-rust 463 datang
     lewat ack server, bukan `SendError` → perlu riset.
   - `allow_reshare` divalidasi tapi flag reshare belum dipasang ke pesan status.
@@ -98,6 +111,19 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-23 — Fase 3: chat storage
+- `storage/chat.rs`: tabel `chats`, `messages`, `message_reactions`, `message_edits` (migrasi `000002`), upsert ala GOWA
+  (replay tidak menghapus `context_metadata`; pesan terkirim tidak menimpa edit), list/count/search + reaksi, delete cascade,
+  `delete_device_data`.
+- `wa/message.rs`: port `ExtractMessageTextFromProto` (tanpa pesan bisnis), `ExtractMediaInfo`, `GenerateMediaFilename`,
+  `ExtractContextMetadata`, `ExtractEphemeralExpiration`, `ExtractPhoneFromVCard`, ringkasan kontak/lokasi, revoke/edit/reaction.
+- `device/ingest.rs`: `CreateMessage` (nama chat, timer, arsip), reaksi, revoke (author/admin grup/akun sendiri), edit (author check,
+  stub hanya untuk edit sendiri), pesan terkirim, history sync (bootstrap/recent/on-demand + push name), `ArchiveUpdate`.
+- Processor menyimpan sebelum webhook; `Resolver::is_group_admin` (fetch metadata grup). Purge device menghapus partisi slot + JID
+  (kecuali JID dipakai slot lain). `DeviceManager::bootstrap` kini menerima `Db`.
+- Reply (`merge_reply`) dan default timer `/send/message` membaca chat storage; `device/recent.rs` dihapus.
+- Smoke: server start di direktori kosong → semua tabel termigrasi. Belum diuji dengan akun live.
 
 ### 2026-11-23 — WebSocket `/ws`
 - `device/hub.rs` + `http/routes/ws.rs`: `{code,message,result}`; `FETCH_DEVICES` → `LIST_DEVICES`; event `LOGIN_SUCCESS`,

@@ -350,6 +350,8 @@ fn incoming(
         verified_name: None,
         verified_level: None,
         is_business: false,
+        sender_alt: None,
+        admin_revoke: false,
         message: Arc::new(message),
     }
 }

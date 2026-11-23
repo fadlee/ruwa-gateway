@@ -32,7 +32,8 @@ struct Harness {
 async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Harness {
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("storages/devices");
-    let registry = Registry::new(Db::open(&dir.path().join("ruwa.db").to_string_lossy()).unwrap());
+    let db = Db::open(&dir.path().join("ruwa.db").to_string_lossy()).unwrap();
+    let registry = Registry::new(db.clone());
     for (i, slot) in slots.iter().enumerate() {
         registry
             .insert(DeviceRecord::new(slot, slot, i as i64))
@@ -48,7 +49,7 @@ async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Har
             media_dir: dir.path().join("statics/media"),
             auto_download_media: true,
         },
-        registry,
+        db,
         Dispatcher::new(WebhookConfig::default()).unwrap(),
     )
     .await

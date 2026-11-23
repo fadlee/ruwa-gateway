@@ -10,13 +10,13 @@ use tokio::sync::mpsc;
 
 use super::{
     hub::Hub,
+    ingest,
     instance::{DeviceInstance, PairCode, QrCode},
-    recent::RecentMessage,
 };
 use crate::{
     events::{self, IncomingMessage, MediaRef, ReceiptView, Resolver},
     wa::{
-        Jid, message as msgx,
+        Jid,
         sdk::prelude::{Client, Event, EventHandler, EventInterest, EventKind, InboundMessage},
     },
     webhook::Dispatcher,
@@ -54,6 +54,8 @@ const KINDS: &[EventKind] = &[
     EventKind::ChatPresence,
     EventKind::TemporaryBan,
     EventKind::StreamReplaced,
+    EventKind::HistorySync,
+    EventKind::ArchiveUpdate,
 ];
 
 impl EventHandler for Relay {
@@ -87,12 +89,12 @@ pub(super) async fn run(
 
 async fn handle(
     device: &Arc<DeviceInstance>,
-    event: &Event,
+    event_arc: &Arc<Event>,
     webhook: &Dispatcher,
     media: &MediaSettings,
     hub: &Hub,
 ) {
-    match event {
+    match &**event_arc {
         Event::PairingQrCode(qr) => {
             device.qr.send_replace(Some(QrCode {
                 code: qr.code.clone(),
@@ -171,10 +173,22 @@ async fn handle(
             let Some(client) = device.client() else {
                 return;
             };
-            let resolver = ClientResolver::new(client, media.clone());
+            let resolver = ClientResolver::new(client.clone(), media.clone());
+            let own = own_jid(&client);
             for inbound in batch.messages.iter() {
                 let m = incoming(inbound);
-                remember(device, &resolver, &m).await;
+                // Store first, like GOWA, so replies to it resolve at once.
+                if let Err(error) = ingest::store_incoming(
+                    device.chats(),
+                    &resolver,
+                    &device.storage_partition(),
+                    own.as_ref(),
+                    &m,
+                )
+                .await
+                {
+                    tracing::error!(device = %device.id(), id = %m.id, %error, "failed to store incoming message");
+                }
                 let (name, payload) = events::message_payload(&resolver, &m).await;
                 let mut env = events::envelope(name, &device.jid().unwrap_or_default(), payload);
                 add_session_id(device, &mut env);
@@ -257,6 +271,57 @@ async fn handle(
                 result,
             );
         }
+        Event::HistorySync(sync) => {
+            let Some(client) = device.client() else {
+                return;
+            };
+            // Inflate + decode off the runtime; the result is cached in the event.
+            let job = event_arc.clone();
+            let decoded = tokio::task::spawn_blocking(
+                move || matches!(&*job, Event::HistorySync(s) if s.get().is_some()),
+            )
+            .await
+            .unwrap_or(false);
+            let Some(data) = sync.get().filter(|_| decoded) else {
+                tracing::warn!(device = %device.id(), "could not decode history sync");
+                return;
+            };
+            tracing::info!(
+                device = %device.id(),
+                sync_type = sync.sync_type(),
+                conversations = data.conversations.len(),
+                "storing history sync"
+            );
+            let resolver = ClientResolver::new(client.clone(), media.clone());
+            if let Err(error) = ingest::store_history(
+                device.chats(),
+                &resolver,
+                &device.storage_partition(),
+                own_jid(&client).as_ref(),
+                data,
+            )
+            .await
+            {
+                tracing::error!(device = %device.id(), %error, "failed to store history sync");
+            }
+        }
+        Event::ArchiveUpdate(update) => {
+            let (Some(client), Some(archived)) = (device.client(), update.action.archived) else {
+                return;
+            };
+            let resolver = ClientResolver::new(client, media.clone());
+            if let Err(error) = ingest::store_archive(
+                device.chats(),
+                &resolver,
+                &device.storage_partition(),
+                &update.jid,
+                archived,
+            )
+            .await
+            {
+                tracing::warn!(device = %device.id(), %error, "failed to update archive state");
+            }
+        }
         Event::StreamReplaced(_) => {
             tracing::warn!(device = %device.id(), "stream replaced by another client");
             hub.publish(
@@ -289,32 +354,17 @@ fn incoming(inbound: &InboundMessage) -> IncomingMessage {
         timestamp: info.timestamp.as_secs(),
         is_business: info.verified_name.is_some(),
         verified_name,
+        sender_alt: info.source.sender_alt.clone(),
+        admin_revoke: info.edit
+            == crate::wa::sdk::wacore::types::message::EditAttribute::AdminRevoke,
         verified_level: info.verified_level.clone(),
         message: inbound.message.clone(),
     }
 }
 
-/// Keep text messages around so `/send/message` can quote them by id.
-async fn remember(device: &DeviceInstance, r: &ClientResolver, m: &IncomingMessage) {
-    let base = msgx::unwrap(&m.message);
-    let Some(text) = msgx::text(base).or_else(|| msgx::caption(base)) else {
-        return;
-    };
-    let sender = if m.sender.is_lid() {
-        r.pn_for_lid(&m.sender)
-            .await
-            .unwrap_or_else(|| m.sender.to_non_ad())
-    } else {
-        m.sender.to_non_ad()
-    };
-    device.remember(
-        m.id.clone(),
-        RecentMessage {
-            chat: m.chat.to_non_ad().to_string(),
-            sender: sender.to_string(),
-            text: text.to_owned(),
-        },
-    );
+/// The account's own JID (non-AD phone number).
+fn own_jid(client: &Client) -> Option<Jid> {
+    client.pn().map(|pn| pn.to_non_ad())
 }
 
 /// `Resolver` backed by a live client's LID store and identity.
@@ -363,6 +413,22 @@ impl Resolver for ClientResolver {
 
     fn auto_download(&self) -> bool {
         self.media.auto_download
+    }
+
+    async fn is_group_admin(&self, group: &Jid, user: &Jid, alt: Option<&Jid>) -> bool {
+        let Ok(meta) = self.client.groups().fetch_metadata(group).await else {
+            return false;
+        };
+        let matches = |j: &Jid| {
+            let j = j.to_non_ad();
+            j == user.to_non_ad() || alt.is_some_and(|a| a.to_non_ad() == j)
+        };
+        meta.participants.iter().any(|p| {
+            p.is_admin()
+                && (matches(&p.jid)
+                    || p.phone_number.as_ref().is_some_and(matches)
+                    || p.lid.as_ref().is_some_and(matches))
+        })
     }
 
     async fn save_media<'a>(&'a self, media: MediaRef<'a>) -> anyhow::Result<String> {

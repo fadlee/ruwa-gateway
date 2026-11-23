@@ -3,7 +3,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex as StdMutex, RwLock as StdRwLock,
+        Arc, RwLock as StdRwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -14,9 +14,11 @@ use tokio::sync::{Mutex, watch};
 use super::{
     DeviceManager,
     processor::{Job, Relay},
-    recent::{RecentMessage, RecentMessages},
 };
-use crate::storage::registry::{DeviceRecord, DeviceWebhook, Registry};
+use crate::storage::{
+    chat::ChatStore,
+    registry::{DeviceRecord, DeviceWebhook, Registry},
+};
 use crate::wa::sdk::{
     self,
     pair_code::PairCodeOptions,
@@ -44,6 +46,7 @@ pub struct DeviceInstance {
     dir: PathBuf,
     created_at: i64,
     registry: Registry,
+    chats: ChatStore,
     webhook: StdRwLock<DeviceWebhook>,
     handle: Mutex<Option<BotHandle>>,
     client: StdRwLock<Option<Arc<Client>>>,
@@ -53,19 +56,24 @@ pub struct DeviceInstance {
     /// Set while this process logs the slot out, so the resulting
     /// `LoggedOut` event is not reported as a remote logout.
     pub(super) local_logout: AtomicBool,
-    recent: StdMutex<RecentMessages>,
     /// Serialises login/logout/reconnect (GOWA `lockLogin`).
     pub login_lock: Mutex<()>,
 }
 
 impl DeviceInstance {
-    pub(super) fn new(record: &DeviceRecord, dir: PathBuf, registry: Registry) -> Self {
+    pub(super) fn new(
+        record: &DeviceRecord,
+        dir: PathBuf,
+        registry: Registry,
+        chats: ChatStore,
+    ) -> Self {
         let jid = Some(record.jid.clone()).filter(|j| !j.is_empty());
         Self {
             id: record.device_id.clone(),
             dir,
             created_at: record.created_at,
             registry,
+            chats,
             webhook: StdRwLock::new(record.webhook()),
             handle: Mutex::new(None),
             client: StdRwLock::new(None),
@@ -73,7 +81,6 @@ impl DeviceInstance {
             qr: watch::channel(None).0,
             pair: watch::channel(None).0,
             local_logout: AtomicBool::new(false),
-            recent: StdMutex::new(RecentMessages::default()),
             login_lock: Mutex::new(()),
         }
     }
@@ -158,12 +165,14 @@ impl DeviceInstance {
         }
     }
 
-    pub fn remember(&self, id: String, message: RecentMessage) {
-        self.recent.lock().expect("recent lock").insert(id, message);
+    pub fn chats(&self) -> &ChatStore {
+        &self.chats
     }
 
-    pub fn recall(&self, id: &str) -> Option<RecentMessage> {
-        self.recent.lock().expect("recent lock").get(id).cloned()
+    /// Chat-storage partition key (GOWA `deviceIDFromContext`): the account
+    /// JID once paired, else the slot id.
+    pub fn storage_partition(&self) -> String {
+        self.jid().unwrap_or_else(|| self.id.clone())
     }
 
     /// Open the store and spawn the bot. With `pair` set, the bot links by

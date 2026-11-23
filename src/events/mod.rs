@@ -42,6 +42,18 @@ pub trait Resolver: Send + Sync {
         &'a self,
         media: MediaRef<'a>,
     ) -> impl Future<Output = anyhow::Result<String>> + Send + 'a;
+
+    /// Whether `user` (or its alternate address) currently administers
+    /// `group`. A failed lookup is not an admin.
+    fn is_group_admin(
+        &self,
+        group: &Jid,
+        user: &Jid,
+        alt: Option<&Jid>,
+    ) -> impl Future<Output = bool> + Send {
+        let _ = (group, user, alt);
+        async { false }
+    }
 }
 
 /// Downloadable media inside a message.
@@ -66,6 +78,10 @@ pub struct IncomingMessage {
     pub verified_name: Option<String>,
     pub verified_level: Option<String>,
     pub is_business: bool,
+    /// Alternate address of the sender (PN for a LID sender and vice versa).
+    pub sender_alt: Option<Jid>,
+    /// Stanza `edit="8"`: a group admin deleting someone else's message.
+    pub admin_revoke: bool,
     pub message: Arc<proto::Message>,
 }
 

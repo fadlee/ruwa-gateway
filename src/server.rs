@@ -7,7 +7,7 @@ use crate::{
     config::Config,
     device::{DeviceManager, DeviceOptions},
     http::{self, AppState, Settings},
-    storage::{Db, registry::Registry},
+    storage::Db,
     ui::{UiAsset, UiConfig},
     webhook::{Dispatcher, WebhookConfig},
 };
@@ -31,7 +31,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             media_dir: PathBuf::from("statics/media"),
             auto_download_media: cfg.auto_download_media,
         },
-        Registry::new(db),
+        db,
         webhook,
     )
     .await?;

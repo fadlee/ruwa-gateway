@@ -693,3 +693,39 @@ async fn presence_events() {
         .remove("from_lid");
     assert_matches_doc(&online, &blocks[1]);
 }
+
+#[tokio::test]
+async fn message_deleted_event() {
+    let r = FakeResolver::new(&[]);
+    let view = DeletedView {
+        id: "3EB0C127D7BACC83D6A1".into(),
+        from: jid("628987654321@s.whatsapp.net"),
+        event_chat: jid("628987654321@s.whatsapp.net"),
+        chat_id: "628987654321@s.whatsapp.net".into(),
+        content: "Hello, how are you?".into(),
+        sender: "628987654321@s.whatsapp.net".into(),
+        timestamp: secs("2025-07-13T10:30:00Z"),
+        was_from_me: false,
+        media_type: String::new(),
+        filename: String::new(),
+    };
+    let actual = Value::Object(
+        message_deleted_envelope(
+            &r,
+            &view,
+            "628123456789@s.whatsapp.net",
+            secs("2025-07-13T11:12:00Z"),
+        )
+        .await,
+    );
+    assert_matches_doc(&actual, &doc_example("Message Deleted"));
+
+    let mut media = view.clone();
+    media.media_type = "image".into();
+    media.filename = "a.jpg".into();
+    media.event_chat = jid("251556368777322@lid");
+    let env = message_deleted_envelope(&r, &media, "d", 0).await;
+    assert_eq!(env["payload"]["original_media_type"], "image");
+    assert_eq!(env["payload"]["original_filename"], "a.jpg");
+    assert_eq!(env["payload"]["chat_lid"], "251556368777322@lid");
+}

@@ -62,6 +62,7 @@ const KINDS: &[EventKind] = &[
     EventKind::GroupUpdate,
     EventKind::IncomingCall,
     EventKind::Presence,
+    EventKind::DeleteMessageForMeUpdate,
 ];
 
 impl EventHandler for Relay {
@@ -361,6 +362,61 @@ async fn handle(
             {
                 tracing::warn!(device = %device.id(), %error, "failed to store contact");
             }
+        }
+        Event::DeleteMessageForMeUpdate(update) => {
+            let Some(client) = device.client() else {
+                return;
+            };
+            let partition = device.storage_partition();
+            // GOWA looks the id up per device, then deletes that stored row.
+            let stored = match device
+                .chats()
+                .get_message(&partition, &update.message_id)
+                .await
+            {
+                Ok(Some(m)) => m,
+                Ok(None) => return,
+                Err(error) => {
+                    tracing::error!(device = %device.id(), %error, "failed to look up deleted message");
+                    return;
+                }
+            };
+            if let Err(error) = device
+                .chats()
+                .delete_message(&partition, &stored.chat_jid, &stored.id)
+                .await
+            {
+                tracing::error!(device = %device.id(), %error, "failed to delete message");
+            }
+            let own = device.jid().unwrap_or_default();
+            let from = update
+                .participant_jid
+                .clone()
+                .or_else(|| {
+                    if update.from_me {
+                        own.parse::<Jid>().ok()
+                    } else {
+                        Some(update.chat_jid.clone())
+                    }
+                })
+                .unwrap_or_else(|| update.chat_jid.clone());
+            let resolver = ClientResolver::new(client, media.clone(), device);
+            let view = events::DeletedView {
+                id: stored.id.clone(),
+                from,
+                event_chat: update.chat_jid.clone(),
+                chat_id: stored.chat_jid.clone(),
+                content: stored.content.clone(),
+                sender: stored.sender.clone(),
+                timestamp: stored.timestamp,
+                was_from_me: stored.is_from_me,
+                media_type: stored.media_type.clone(),
+                filename: stored.filename.clone(),
+            };
+            let mut env =
+                events::message_deleted_envelope(&resolver, &view, &own, super::now()).await;
+            add_session_id(device, &mut env);
+            webhook.send(events::MESSAGE_DELETED, env, &device.webhook());
         }
         Event::Presence(update) => {
             use crate::wa::sdk::wacore::types::presence::PresenceStatus;

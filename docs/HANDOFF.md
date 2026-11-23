@@ -6,8 +6,8 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence|poll` selesai; `/user/*`, `/call/reject`, `call.offer` + auto-reject selesai; auto reply + auto mark read selesai; event `presence` + presence on-connect/pulse selesai; berikutnya `message.deleted`, event label.
-- **Build**: `cargo test` (171 test: 127 unit + 44 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence|poll` selesai; `/user/*`, `/call/reject`, `call.offer` + auto-reject selesai; auto reply + auto mark read selesai; event `presence` + presence on-connect/pulse selesai; `message.deleted` selesai; berikutnya event label.
+- **Build**: `cargo test` (172 test: 128 unit + 44 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -44,7 +44,7 @@
    Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
    `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
    `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
-2. Fase 3 lanjutan: `message.deleted`, event label, auto reply/mark read/reject call.
+2. Fase 3 lanjutan: event label (`label.edit`, `label.association`), auto reply/mark read/reject call.
 
 ## Keputusan yang sudah diambil
 
@@ -90,6 +90,7 @@
 
 ## Catatan / jebakan
 
+- `message.deleted` (dari `DeleteMessageForMeUpdate`): seperti GOWA, hanya dikirim bila salinan pesan ada di storage device itu (dicari per id, lalu baris dihapus); tanpa `timestamp` top-level (ada di payload, = waktu proses). `from` = peserta bila disebut, selain itu akun sendiri bila `from_me`, selain itu chat (SDK tak punya `SenderJID` whatsmeow persis). `chat_id` = chat tersimpan, `chat_lid` bila event menyebut chat dengan LID.
 - Presence sendiri (`device/presence.rs`): saat `Connected` dikirim `WHATSAPP_PRESENCE_ON_CONNECT` (`available`/`unavailable`/`none`, default `unavailable`, nilai lain = unavailable seperti GOWA). Pulse (default aktif): tiap menit tiap device yang connected & login dicek; bila ≥ `WHATSAPP_PRESENCE_PULSE_INTERVAL` (24h) sejak pulse sukses terakhir → available, tidur `..._DURATION` (5m), lalu unavailable. Pulse gagal dicoba lagi pada cek berikutnya. Durasi memakai subset `time.ParseDuration` Go (`h m s ms`, bisa digabung); nilai 0/negatif **ditolak** saat start (GOWA diam-diam memakai default). Efek samping (dari dokumen GOWA): akun *available* menekan notifikasi di HP — makanya default `unavailable`. Pulse jalan per proses, state `last` hanya di memori (restart → pulse langsung).
 - Event `presence`: `timestamp` = waktu proses (GOWA `time.Now()`), `last_seen` hanya bila SDK memberi nilai. WhatsApp hanya mengirimnya untuk kontak yang sudah di-subscribe (`/user/presence/subscribe`) dan selama akun berstatus *available*; presence pulse/`WHATSAPP_PRESENCE_ON_CONNECT` belum ada, jadi event bisa jarang muncul (lihat catatan `chat_presence`).
 - Auto reply/mark read ada di `device/processor.rs` (`auto_reply`, `auto_mark_read`), dijalankan setelah pesan masuk disimpan dan sebelum webhook (urutan GOWA). Auto-reply hanya untuk chat 1:1 (`@s.whatsapp.net`/`@lid`), teks ketikan asli (bukan caption; edit teks dihitung), bukan pesan sendiri; balasan dikirim ke `sender` dan disimpan ke chat storage. Mark read memakai waktu sekarang dan, di grup, menyebut pengirim. Balasan otomatis tidak memakai chat-presence/jeda apa pun; tidak ada pencegahan loop selain filter di atas (dua akun dengan auto-reply saling membalas bisa berputar — GOWA sama).
@@ -150,6 +151,9 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — Fase 3: `message.deleted`
+- `events::message_deleted_envelope` + `DeletedView`; handler `Event::DeleteMessageForMeUpdate` di `processor.rs` (hapus baris + webhook). Test: golden `message_deleted_event` (+ media/LID). Belum diuji dengan akun live (cek: "hapus untuk saya" dari HP → webhook + pesan hilang dari `/chat/{jid}/messages`).
 
 ### 2026-11-24 — Fase 3: presence on connect + pulse
 - `config.rs`: `WHATSAPP_PRESENCE_ON_CONNECT|PULSE_ENABLED|PULSE_INTERVAL|PULSE_DURATION` + `parse_go_duration`; `device/presence.rs` (`send_on_connect`, `PulseClock`, `start_pulse`), dipanggil dari `processor` (Connected) dan `server.rs`. Test: `on_connect_setting`, `pulse_clock_respects_interval_and_in_flight`, `go_durations`. Belum diuji dengan akun live (cek: `presence-on-connect=available` lalu subscribe kontak → webhook `presence`/`chat_presence` muncul).

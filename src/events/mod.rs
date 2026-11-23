@@ -444,6 +444,7 @@ fn other_types(msg: &proto::Message, p: &mut Map<String, Value>) {
 
 pub const CHAT_PRESENCE: &str = "chat_presence";
 pub const DEVICE_TEMPORARY_BAN: &str = "device.temporary_ban";
+pub const MESSAGE_DELETED: &str = "message.deleted";
 pub const PRESENCE: &str = "presence";
 pub const CALL_OFFER: &str = "call.offer";
 pub const GROUP_PARTICIPANTS: &str = "group.participants";
@@ -678,6 +679,63 @@ pub fn device_envelope(
         env.insert("device_id".into(), jid.into());
     }
     env
+}
+
+/// A message deleted "for me", with the stored copy that was removed.
+#[derive(Debug, Clone)]
+pub struct DeletedView {
+    pub id: String,
+    /// Who the event names (participant, else the account, else the chat).
+    pub from: Jid,
+    /// The chat as the event named it (may be a LID).
+    pub event_chat: Jid,
+    pub chat_id: String,
+    pub content: String,
+    pub sender: String,
+    pub timestamp: i64,
+    pub was_from_me: bool,
+    pub media_type: String,
+    pub filename: String,
+}
+
+/// `message.deleted` (GOWA `createDeletePayload`). Unlike most events it has
+/// no top-level `timestamp`; that lives in the payload.
+pub async fn message_deleted_envelope<R: Resolver>(
+    r: &R,
+    d: &DeletedView,
+    device_id: &str,
+    now: i64,
+) -> Map<String, Value> {
+    let mut p = Map::new();
+    p.insert("deleted_message_id".into(), d.id.clone().into());
+    p.insert("timestamp".into(), rfc3339(now).into());
+    if d.from.is_lid() {
+        p.insert("from_lid".into(), wa::jid::non_ad_string(&d.from).into());
+    }
+    p.insert(
+        "from".into(),
+        normalize(r, &d.from).await.to_string().into(),
+    );
+    p.insert(
+        "sender_display_name".into(),
+        r.display_name(&d.from, false, "").await.into(),
+    );
+    if d.event_chat.is_lid() {
+        p.insert(
+            "chat_lid".into(),
+            wa::jid::non_ad_string(&d.event_chat).into(),
+        );
+    }
+    p.insert("chat_id".into(), d.chat_id.clone().into());
+    p.insert("original_content".into(), d.content.clone().into());
+    p.insert("original_sender".into(), d.sender.clone().into());
+    p.insert("original_timestamp".into(), rfc3339(d.timestamp).into());
+    p.insert("was_from_me".into(), d.was_from_me.into());
+    if !d.media_type.is_empty() {
+        p.insert("original_media_type".into(), d.media_type.clone().into());
+        p.insert("original_filename".into(), d.filename.clone().into());
+    }
+    envelope(MESSAGE_DELETED, device_id, p)
 }
 
 /// Online/offline of a subscribed contact (GOWA `createPresencePayload`).

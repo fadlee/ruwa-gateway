@@ -23,6 +23,7 @@
 
 ## Langkah berikutnya
 
+0. **Jalankan [MANUAL-TEST.md](MANUAL-TEST.md)** (checklist verifikasi live, 9 bagian) sebelum Fase 4; salin temuan ke "Catatan / jebakan".
 1. **Uji manual M1+M2 lewat gowa-ui** (paling mudah): `APP_HOST=127.0.0.1 cargo run -- rest` dari direktori kerja
    terpisah, buka `http://localhost:3000/` → kartu device → **Pair** → scan QR dari HP. Lalu menu **Messaging**
    untuk kirim teks/gambar/file/audio/video/kontak/lokasi/link, **Add device** untuk multi-device.
@@ -152,6 +153,9 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — Checklist uji manual
+- `docs/MANUAL-TEST.md`: persiapan (2 akun, grup test, webhook.site), 9 bagian berurutan (pair, chat storage, kirim, webhook masuk, `/message/*`, `/group/*`, `/user/*`, event lain, multi-device/logout) + tabel temuan. Belum dijalankan.
 
 ### 2026-11-24 — Fase 3: `device.reachout_timelock` + error 463
 - `device/acks.rs` (`AckBook`) + `Event::ServerAck` di `processor.rs`; `deliver` menunggu ack; `nack_error`. `Event::ReachoutTimelockUpdate` → webhook `device.reachout_timelock` + hub WS. Test: unit `AckBook` (3), `nack_463_is_reachout_timelock`, golden `device_reachout_timelock`. Belum diuji dengan akun live (cek: kirim ke nomor yang belum pernah chat dengan akun terbatasi → 429; kirim normal tidak jadi lambat).

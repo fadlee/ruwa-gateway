@@ -10,7 +10,12 @@ use serde::Deserialize;
 
 use crate::{
     error::ApiResult,
-    http::{AppState, device_scope::Device, extract::Body, response},
+    http::{
+        AppState,
+        device_scope::Device,
+        extract::{Body, Payload},
+        response,
+    },
     usecase::{group, user},
 };
 
@@ -23,6 +28,8 @@ pub fn router() -> Router<AppState> {
         .route("/user/my/contacts", get(my_contacts))
         .route("/user/my/contacts/detailed", get(my_contacts_detailed))
         .route("/user/pushname", post(push_name))
+        .route("/user/presence/subscribe", post(subscribe))
+        .route("/user/avatar", get(avatar).post(change_avatar))
 }
 
 #[derive(Deserialize)]
@@ -75,6 +82,39 @@ async fn push_name(
     user::change_push_name(&device, req).await?;
     Ok(response::success(
         "Success change push name",
+        serde_json::Value::Null,
+    ))
+}
+
+async fn subscribe(
+    State(state): State<AppState>,
+    Extension(Device(device)): Extension<Device>,
+    Body(req): Body<user::SubscribeRequest>,
+) -> ApiResult<Response> {
+    let res = user::subscribe_presence(&device, req, state.settings.account_validation).await?;
+    Ok(response::success("Success subscribe to user presence", res))
+}
+
+async fn avatar(
+    State(state): State<AppState>,
+    Extension(Device(device)): Extension<Device>,
+    Query(q): Query<user::AvatarQuery>,
+) -> ApiResult<Response> {
+    let res = user::avatar(&device, q, state.settings.account_validation).await?;
+    Ok(response::success("Success get avatar", res))
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct AvatarForm {}
+
+async fn change_avatar(
+    Extension(Device(device)): Extension<Device>,
+    mut body: Payload<AvatarForm>,
+) -> ApiResult<Response> {
+    user::change_avatar(&device, body.file("avatar")).await?;
+    Ok(response::success(
+        "Success change avatar",
         serde_json::Value::Null,
     ))
 }

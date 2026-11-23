@@ -6,8 +6,8 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname` selesai; berikutnya sisa `/user/*` (avatar, my/newsletters, business-profile, presence/subscribe), sticker/poll/presence, event grup.
-- **Build**: `cargo test` (146 test: 109 unit + 37 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; berikutnya sisa `/user/*` (my/newsletters, business-profile), sticker/poll/presence, event grup.
+- **Build**: `cargo test` (151 test: 112 unit + 39 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -16,7 +16,7 @@
   auto-download, `/user/*`, logout dari HP (`device.logged_out`), temp ban, **chat storage** (history sync setelah
   pair, pesan masuk/keluar tersimpan, reply setelah restart), `/chat/{jid}/pin|archive|disappearing|history`
   (app-state/protocol ke WhatsApp), nama dari `ContactUpdate`, **backfill nama** (nama grup placeholder terisi, replay kontak `CriticalUnblockLow`), semua `/message/{id}/*` (revoke/edit/reaction/read/
-  played/star/delete-for-me/forward/download), **semua `/group/*`, `/user/my/groups|privacy|contacts[/detailed]` dan `/user/pushname`** (butuh akun yang ada di grup; admin untuk
+  played/star/delete-for-me/forward/download), **semua `/group/*`, `/user/my/groups|privacy|contacts[/detailed]` `/user/pushname`, `/user/avatar` dan `/user/presence/subscribe`** (butuh akun yang ada di grup; admin untuk
   name/locked/announce/topic/photo/participants). Cek via gowa-ui menu Chats/Groups atau `GET /chats`.
 - **whatsapp-rust rev**: `94877bedb6cd473864f9f6b332a5c13d5fbef789`
 - **GOWA acuan**: `3744c92a24fa0806c68df9bf6a34db4340016e10` (snapshot di `docs/upstream/`)
@@ -44,7 +44,7 @@
    Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
    `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
    `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
-2. Fase 3 lanjutan: sisa `/user/*` (avatar, my/newsletters, business-profile, presence/subscribe), sticker/poll/
+2. Fase 3 lanjutan: sisa `/user/*` (my/newsletters, business-profile), sticker/poll/
    presence, event grup/label/call (`group.participants|info|joined` dari `GroupUpdate`), auto reply/mark read/reject call.
 
 ## Keputusan yang sudah diambil
@@ -125,6 +125,8 @@
     versi whatsmeow acuan GOWA lebih baru dari yang bisa diverifikasi → bandingkan dengan output GOWA asli bila ada konsumen yang bergantung.
     `DefaultMembershipApprovalMode`/`AnnounceVersionID` selalu kosong (whatsapp-rust tidak mengeksposnya).
   - `/group/participants|participant-requests`: `display_name` hanya dari tabel `contacts` (GOWA juga memakai verified name dari usync).
+  - `/user/avatar` GET: SDK memberi `NotFound`/`NotAuthorized` (bukan error) → `AVATAR_NOT_SET` 404 / `AVATAR_HIDDEN` 403 dengan pesan whatsmeow; timeout 5 dtk per percobaan → 408 `CONTEXT_ERROR`; `is_community` dipaksa false untuk JID user dan, bila gagal, jatuh ke rute biasa (hanya diklasifikasi bila kedua percobaan sepakat, selain itu 500). Boolean query tak valid → 500 (Fiber `Bind().Query`). `type` = `preview`/`image` menurut `is_preview` (GOWA: atribut node). POST: tanpa file → 500 sebelum cek login; foto diproses seperti foto grup (crop persegi, ≤640px, JPEG q80) lalu `profile().set_profile_picture`.
+  - `/user/presence/subscribe`: LID yang pemetaannya diketahui diubah ke nomor oleh `resolve_recipient` (GOWA menolaknya sebagai non-user); peringatan `WHATSAPP_PRESENCE_ON_CONNECT` belum ada karena presence-on-connect belum diport.
   - `/user/pushname`: nama kosong ditolak whatsapp-rust → 500 (GOWA mengirim app-state kosong tanpa validasi); `SyncPending` (presence terkirim tapi app-state gagal) dipetakan ke 500 seperti GOWA. `/user/pushname` memakai scope device (GOWA memakai `c.Context()` tanpa device).
   - `/user/my/contacts/detailed`: `lid` dari `get_lid_pn_entry` (PN→LID) — hanya terisi bila pemetaan sudah dipelajari SDK; filter bot memakai prefix `1313555`/`131655500` (whatsmeow `IsBot`).
   - `/user/my/groups`: grup yang daftar pesertanya dipotong server (`Truncated`) keluar dengan `Participants: []` + `ParticipantCount` benar dan field lain kosong; grup `Forbidden`/`NotFound` di antara dua IQ dilewati. `ParticipantCount` kini juga ada di `/group/info` (struct Go sama). `truncated_group_json` belum punya unit test (`GroupOverview` `non_exhaustive`, tak bisa dibangun di luar SDK).
@@ -142,6 +144,10 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — Fase 3: `/user/presence/subscribe`, `/user/avatar`
+- `usecase/user.rs`: `subscribe_presence` (`presence().subscribe`), `avatar` (`pictures().lookup`; `Fetched` + `combine` murni untuk klasifikasi/fallback), `change_avatar`. Route di `http/routes/user.rs`.
+- Test: `presence_subscribe_validates_then_needs_login`, `avatar_endpoints_validate_then_need_login`, unit `avatar_*`/`community_fallback_*`. Belum diuji dengan akun live (cek: avatar kontak tanpa foto → 404, foto disembunyikan → 403, ganti avatar sendiri).
 
 ### 2026-11-24 — Fase 3: `/user/my/privacy|contacts|contacts/detailed`, `/user/pushname`
 - `usecase/user.rs`: `my_privacy` (`fetch_privacy_settings`), `change_push_name` (`profile().set_push_name`), `my_contacts` (nama via `names::preferred_contact_name`), `my_contacts_detailed` (`person_contacts` murni: server pn/lid, tanpa bot, satu baris per user, urut JID). `storage::ChatStore::all_contacts`.

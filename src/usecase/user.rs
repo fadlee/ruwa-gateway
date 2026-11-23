@@ -1,5 +1,6 @@
 //! `/user/check` and `/user/info` (GOWA `usecase/user.go`).
 
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -10,11 +11,14 @@ use super::{
 use crate::{
     device::DeviceInstance,
     error::{ApiError, ApiResult},
+    media::{self, Upload},
     storage::chat::Contact,
     wa::{
         Jid, Server, jid,
         sdk::{
-            PushNameOutcome,
+            ProfilePicture, ProfilePictureLookup, ProfilePictureRequest, ProfilePictureTarget,
+            ProfilePictureType, PushNameOutcome,
+            prelude::Client,
             privacy_settings::{PrivacyCategory, PrivacyValue},
         },
     },
@@ -329,6 +333,196 @@ pub async fn my_contacts_detailed(device: &DeviceInstance) -> ApiResult<Value> {
     Ok(data_or_null(rows))
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct SubscribeRequest {
+    #[serde(default)]
+    pub phone: String,
+}
+
+/// `POST /user/presence/subscribe` (GOWA `SubscribePresence`): individual users
+/// only; a group or newsletter JID is refused instead of a false success.
+pub async fn subscribe_presence(
+    device: &DeviceInstance,
+    req: SubscribeRequest,
+    account_validation: bool,
+) -> ApiResult<Value> {
+    required(&[("phone", req.phone.trim())])?;
+    let client = must_login(device)?;
+    let phone = jid::sanitize_phone(req.phone.trim());
+    let target = resolve_recipient(&client, &phone, account_validation).await?;
+    if target.server != Server::Pn {
+        return Err(ApiError::invalid_jid(format!(
+            "presence subscription requires a user phone number, got non-user JID {}",
+            target.to_non_ad()
+        )));
+    }
+    client
+        .presence()
+        .subscribe(target.clone())
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(json!({ "subscribed": true, "jid": target.to_non_ad().to_string() }))
+}
+
+/// `GET /user/avatar` query. Booleans stay strings: Fiber's `Bind().Query`
+/// fails on a malformed one (a 500), which `parse_flag` reproduces.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct AvatarQuery {
+    pub phone: String,
+    pub is_preview: String,
+    pub is_community: String,
+}
+
+/// Go `strconv.ParseBool`; an absent value is false.
+fn parse_flag(field: &str, raw: &str) -> ApiResult<bool> {
+    match raw {
+        "" | "0" | "f" | "F" | "FALSE" | "false" | "False" => Ok(false),
+        "1" | "t" | "T" | "TRUE" | "true" | "True" => Ok(true),
+        _ => Err(ApiError::internal(format!(
+            "failed to decode query: {field}: invalid boolean {raw:?}"
+        ))),
+    }
+}
+
+const AVATAR_NOT_SET: &str = "that user or group does not have a profile picture";
+const AVATAR_HIDDEN: &str = "the user has hidden their profile picture from you";
+const AVATAR_TIMEOUT: &str = "Error timeout get avatar!";
+
+/// One picture lookup, with whatsmeow's three error sentinels kept apart.
+#[derive(Debug, PartialEq, Eq)]
+enum Fetched {
+    Found(ProfilePicture),
+    NotSet,
+    Hidden,
+    Timeout,
+    Failed(String),
+}
+
+impl Fetched {
+    fn into_result(self) -> ApiResult<ProfilePicture> {
+        match self {
+            Self::Found(pic) => Ok(pic),
+            Self::NotSet => Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "AVATAR_NOT_SET",
+                AVATAR_NOT_SET,
+            )),
+            Self::Hidden => Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "AVATAR_HIDDEN",
+                AVATAR_HIDDEN,
+            )),
+            Self::Timeout => Err(ApiError::new(
+                StatusCode::REQUEST_TIMEOUT,
+                "CONTEXT_ERROR",
+                AVATAR_TIMEOUT,
+            )),
+            Self::Failed(message) => Err(ApiError::internal(message)),
+        }
+    }
+
+    fn message(self) -> String {
+        match self {
+            Self::NotSet => AVATAR_NOT_SET.into(),
+            Self::Hidden => AVATAR_HIDDEN.into(),
+            Self::Timeout => AVATAR_TIMEOUT.into(),
+            Self::Failed(message) => message,
+            Self::Found(_) => "no avatar found".into(),
+        }
+    }
+}
+
+/// GOWA `Avatar` fallback: after a failed community lookup the plain one
+/// decides. A "not set" / "hidden" answer is only reported as such when both
+/// attempts agree (a community picture asked the plain way can read as
+/// unauthorized), otherwise the fallback's error comes back unclassified.
+fn combine(community: Fetched, plain: Fetched) -> ApiResult<ProfilePicture> {
+    match (community, plain) {
+        (_, Fetched::Found(pic)) => Ok(pic),
+        (_, Fetched::Timeout) => Fetched::Timeout.into_result(),
+        (Fetched::NotSet, Fetched::NotSet) => Fetched::NotSet.into_result(),
+        (Fetched::Hidden, Fetched::Hidden) => Fetched::Hidden.into_result(),
+        (_, other) => Err(ApiError::internal(other.message())),
+    }
+}
+
+async fn fetch_avatar(
+    client: &Client,
+    target: &Jid,
+    kind: ProfilePictureType,
+    community: bool,
+) -> Fetched {
+    let route = if community {
+        ProfilePictureTarget::Community(target)
+    } else if target.server == Server::Group {
+        ProfilePictureTarget::Group(target)
+    } else {
+        ProfilePictureTarget::Contact(target)
+    };
+    let pictures = client.pictures();
+    let lookup = pictures.lookup(ProfilePictureRequest::new(route, kind));
+    match tokio::time::timeout(std::time::Duration::from_secs(5), lookup).await {
+        Err(_) => Fetched::Timeout,
+        Ok(Err(error)) => Fetched::Failed(error.to_string()),
+        Ok(Ok(ProfilePictureLookup::Found(pic))) => Fetched::Found(pic),
+        Ok(Ok(ProfilePictureLookup::NotFound)) => Fetched::NotSet,
+        Ok(Ok(ProfilePictureLookup::NotAuthorized)) => Fetched::Hidden,
+        // Only a conditional lookup answers "unchanged", and we never send one.
+        Ok(Ok(_)) => Fetched::Failed("no avatar found".into()),
+    }
+}
+
+/// `GET /user/avatar` (GOWA `Avatar`).
+pub async fn avatar(
+    device: &DeviceInstance,
+    query: AvatarQuery,
+    account_validation: bool,
+) -> ApiResult<Value> {
+    let preview = parse_flag("is_preview", &query.is_preview)?;
+    let community = parse_flag("is_community", &query.is_community)?;
+    let phone = jid::sanitize_phone(&query.phone);
+    required(&[("phone", &phone)])?;
+    let client = must_login(device)?;
+    let target = resolve_recipient(&client, &phone, account_validation).await?;
+    let kind = if preview {
+        ProfilePictureType::Preview
+    } else {
+        ProfilePictureType::Full
+    };
+    // A community route on a plain user JID only times out.
+    let community = community && target.server != Server::Pn;
+    let first = fetch_avatar(&client, &target, kind, community).await;
+    let pic = match first {
+        Fetched::Found(pic) => pic,
+        Fetched::Timeout => return Fetched::Timeout.into_result().map(|_| Value::Null),
+        first if community => combine(first, fetch_avatar(&client, &target, kind, false).await)?,
+        first => first.into_result()?,
+    };
+    Ok(json!({
+        "url": pic.url,
+        "id": pic.id,
+        "type": if preview { "preview" } else { "image" },
+    }))
+}
+
+/// `POST /user/avatar` (GOWA `ChangeAvatar`): centre square crop, at most 640px,
+/// JPEG quality 80, set as the account's own picture.
+pub async fn change_avatar(device: &DeviceInstance, upload: Option<Upload>) -> ApiResult<()> {
+    let upload = upload.ok_or_else(|| {
+        ApiError::internal("there is no uploaded file associated with the given key")
+    })?;
+    let client = must_login(device)?;
+    let jpeg = media::image::group_photo(&upload.bytes)
+        .map_err(|e| ApiError::internal(format!("failed to decode image: {e}")))?;
+    client
+        .profile()
+        .set_profile_picture(jpeg)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +584,88 @@ mod tests {
         assert_eq!(privacy_value(&PrivacyValue::Other("x".into())), "x");
         assert_eq!(non_blank("  "), None);
         assert_eq!(non_blank(" a "), Some(" a "));
+    }
+
+    fn pic(id: &str) -> ProfilePicture {
+        ProfilePicture {
+            id: id.into(),
+            url: format!("https://pps/{id}"),
+            direct_path: None,
+            hash: None,
+        }
+    }
+
+    #[test]
+    fn avatar_flags_like_strconv_parse_bool() {
+        assert!(parse_flag("f", "true").unwrap());
+        assert!(parse_flag("f", "T").unwrap());
+        assert!(parse_flag("f", "1").unwrap());
+        assert!(!parse_flag("f", "").unwrap());
+        assert!(!parse_flag("f", "False").unwrap());
+        assert_eq!(
+            parse_flag("f", "yes").unwrap_err().code,
+            "INTERNAL_SERVER_ERROR"
+        );
+    }
+
+    #[test]
+    fn avatar_errors_use_gowa_codes() {
+        let hidden = Fetched::Hidden.into_result().unwrap_err();
+        assert_eq!(
+            (hidden.status, hidden.code.as_str(), hidden.message.as_str()),
+            (
+                StatusCode::FORBIDDEN,
+                "AVATAR_HIDDEN",
+                "the user has hidden their profile picture from you"
+            )
+        );
+        let unset = Fetched::NotSet.into_result().unwrap_err();
+        assert_eq!(unset.status, StatusCode::NOT_FOUND);
+        assert_eq!(unset.code, "AVATAR_NOT_SET");
+        let slow = Fetched::Timeout.into_result().unwrap_err();
+        assert_eq!(
+            (slow.status, slow.code.as_str(), slow.message.as_str()),
+            (
+                StatusCode::REQUEST_TIMEOUT,
+                "CONTEXT_ERROR",
+                "Error timeout get avatar!"
+            )
+        );
+        assert_eq!(
+            Fetched::Failed("boom".into())
+                .into_result()
+                .unwrap_err()
+                .message,
+            "boom"
+        );
+    }
+
+    #[test]
+    fn community_fallback_only_classifies_when_both_agree() {
+        assert_eq!(
+            combine(Fetched::NotSet, Fetched::Found(pic("1")))
+                .unwrap()
+                .id,
+            "1"
+        );
+        assert_eq!(
+            combine(Fetched::NotSet, Fetched::NotSet).unwrap_err().code,
+            "AVATAR_NOT_SET"
+        );
+        assert_eq!(
+            combine(Fetched::Hidden, Fetched::Hidden).unwrap_err().code,
+            "AVATAR_HIDDEN"
+        );
+        // Disagreement: the fallback's error, unclassified (a plain 500).
+        let mixed = combine(Fetched::Hidden, Fetched::NotSet).unwrap_err();
+        assert_eq!(mixed.code, "INTERNAL_SERVER_ERROR");
+        assert_eq!(
+            mixed.message,
+            "that user or group does not have a profile picture"
+        );
+        assert_eq!(
+            combine(Fetched::NotSet, Fetched::Timeout).unwrap_err().code,
+            "CONTEXT_ERROR"
+        );
     }
 }

@@ -624,6 +624,57 @@ async fn user_profile_endpoints_require_login() {
 }
 
 #[tokio::test]
+async fn presence_subscribe_validates_then_needs_login() {
+    let h = harness().await;
+    let (status, body) = call(&h.app, post_json("/user/presence/subscribe", "{}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "VALIDATION_ERROR");
+    assert_eq!(body["message"], "phone: cannot be blank.");
+    let (status, body) = call(
+        &h.app,
+        post_json("/user/presence/subscribe", r#"{"phone":"628123456789"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "AUTHENTICATION_ERROR");
+    let (status, _) = call(&h.app, post_json("/user/presence/subscribe", "{not json")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn avatar_endpoints_validate_then_need_login() {
+    let h = harness().await;
+    let (status, body) = call(&h.app, get("/user/avatar")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["message"], "phone: cannot be blank.");
+    let (status, body) = call(
+        &h.app,
+        get("/user/avatar?phone=628123456789&is_preview=true"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "AUTHENTICATION_ERROR");
+    // Fiber's Bind().Query fails on a malformed boolean: 500.
+    let (status, _) = call(&h.app, get("/user/avatar?phone=628&is_preview=yes")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    // POST: no file is a 500 before the login check; a file reaches the login check.
+    let (status, _) = call(&h.app, multipart("/user/avatar", &[], None)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let (status, body) = call(
+        &h.app,
+        multipart(
+            "/user/avatar",
+            &[],
+            Some(("avatar", "a.png", "image/png", b"x")),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "AUTHENTICATION_ERROR");
+}
+
+#[tokio::test]
 async fn dashboard_falls_back_when_not_downloaded() {
     let h = harness().await;
     let (status, body) = raw(&h.app, get("/")).await;

@@ -9,6 +9,7 @@ pub mod media;
 pub mod server;
 pub mod storage;
 pub mod telemetry;
+pub mod ui;
 pub mod usecase;
 pub mod wa;
 pub mod webhook;

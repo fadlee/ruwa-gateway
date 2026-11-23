@@ -58,7 +58,8 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 
 - [ ] `/newsletter/*` + event `newsletter.*`
 - [ ] Scheduler persisten (`scheduled_sends`), `/send/schedules*`, retry dengan message id sama
-- [ ] `/ws` hub, serve gowa-ui (download release + verifikasi SHA-256)
+- [x] serve gowa-ui (download release + verifikasi SHA-256) — dikerjakan lebih awal untuk uji manual
+- [ ] `/ws` hub, update UI berkala, `APP_UI_ASSET_SHA256`
 - [ ] `/app/metrics`
 - [ ] Docker image + release binary (amd64/arm64)
 

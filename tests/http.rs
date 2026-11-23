@@ -55,6 +55,13 @@ async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Har
     .unwrap();
     std::fs::write(qr_dir.join("probe.png"), b"png").unwrap();
     let state = AppState {
+        ui: ruwa_gateway::ui::UiAsset::new(ruwa_gateway::ui::UiConfig {
+            enabled: true,
+            auto_update: false,
+            repo: "aldinokemal/gowa-ui".into(),
+            asset_name: "gowa-ui.html".into(),
+            cache_dir: dir.path().join("storages/ui"),
+        }),
         credentials: Arc::new(creds),
         devices,
         settings: Arc::new(Settings {
@@ -578,4 +585,12 @@ async fn user_endpoints_require_login() {
     let (status, body) = call(&h.app, get("/user/info")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["message"], "phone: cannot be blank.");
+}
+
+#[tokio::test]
+async fn dashboard_falls_back_when_not_downloaded() {
+    let h = harness().await;
+    let (status, body) = raw(&h.app, get("/")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("not available yet"));
 }

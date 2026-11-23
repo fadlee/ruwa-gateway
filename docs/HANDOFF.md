@@ -19,7 +19,11 @@
 
 ## Langkah berikutnya
 
-1. **Uji manual M1+M2** (butuh HP dengan akun test):
+1. **Uji manual M1+M2 lewat gowa-ui** (paling mudah): `APP_HOST=127.0.0.1 cargo run -- rest` dari direktori kerja
+   terpisah, buka `http://localhost:3000/` → kartu device → **Pair** → scan QR dari HP. Lalu menu **Messaging**
+   untuk kirim teks/gambar/file/audio/video/kontak/lokasi/link, **Add device** untuk multi-device.
+   Halaman Chats/Groups/Channels/sebagian Account akan error (endpoint Fase 3–4); titik status oranye = `/ws` belum ada.
+   Alternatif lewat curl (butuh HP dengan akun test):
    ```sh
    # terminal 1: penerima webhook (atau https://webhook.site)
    python3 -m http.server 9000
@@ -58,6 +62,7 @@
 | 2026-11-23 | Direktori session = `storage_key` (id bila aman, selain itu `x`+hex) | id device GOWA bebas (mis. `../a`); cegah path traversal |
 | 2026-11-23 | Request body media **tanpa** `#[serde(flatten)]` | flatten membuat form/multipart gagal parse angka/bool (`duration`, `is_forwarded`) — ada test |
 | 2026-11-23 | Fetch URL dari user menolak IP non-publik di tiap hop redirect | setara `newUntrustedHTTPClient` GOWA; cegah SSRF |
+| 2026-11-23 | gowa-ui disajikan di `{base}/` (di balik basic auth), diunduh dari release GitHub terbaru saat start, diverifikasi digest SHA-256, cache `storages/ui/index.html` (fitur M4 ditarik maju) | sarana uji manual; sama dengan GOWA v9 (`APP_UI_*`) |
 | 2026-11-23 | `compress` gambar default `true` (JSON tanpa field / multipart), video default `false` | GOWA preset `Compress = true` hanya di handler image |
 
 ## Catatan / jebakan
@@ -92,6 +97,12 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-23 — gowa-ui
+- `src/ui.rs`: unduh `gowa-ui.html` (release latest `aldinokemal/gowa-ui`, cek digest), cache, sajikan di `/`; fallback HTML bila belum ada.
+  Flag `APP_UI_ENABLED`, `APP_UI_AUTO_UPDATE`, `APP_UI_REPO`, `APP_UI_ASSET_NAME`. Belum: update berkala, pin SHA, `/ws`.
+- `/app/info` menambah `max_file_size|max_video_size|max_image_size` (dibaca UI).
+- Diverifikasi live: UI v1.9.0 terunduh (sha cocok), dirender headless Chrome, terhubung dan menampilkan device.
 
 ### 2026-11-23 — Fase 2 (M2) kode selesai
 - 2a (`c913bab`): `storage/` (diesel + migrasi), registry device, `/devices/*` lengkap, webhook per device

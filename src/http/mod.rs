@@ -41,6 +41,7 @@ pub struct AppState {
     pub credentials: Arc<Vec<Credential>>,
     pub devices: Arc<DeviceManager>,
     pub settings: Arc<Settings>,
+    pub ui: crate::ui::UiAsset,
 }
 
 /// Builds the full router.
@@ -63,6 +64,7 @@ pub fn router(state: AppState) -> Router {
         ));
 
     let authed = Router::new()
+        .route("/", get(dashboard))
         .merge(routes::app::unscoped())
         .merge(routes::devices::router())
         .merge(scoped)
@@ -88,6 +90,21 @@ pub fn router(state: AppState) -> Router {
         .merge(api)
         .layer(cors(&state.settings.cors_allowed_origins))
         .layer(TraceLayer::new_for_http())
+}
+
+/// gowa-ui at `{base}/` (behind basic auth, like GOWA).
+async fn dashboard(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !state.ui.enabled() {
+        return response::not_found().await.into_response();
+    }
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        state.ui.content().as_ref().clone(),
+    )
+        .into_response()
 }
 
 /// GOWA CORS: any origin unless `APP_CORS_ALLOWED_ORIGINS` is set.

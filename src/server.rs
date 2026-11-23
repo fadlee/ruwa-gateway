@@ -8,6 +8,7 @@ use crate::{
     device::{DeviceManager, DeviceOptions},
     http::{self, AppState, Settings},
     storage::{Db, registry::Registry},
+    ui::{UiAsset, UiConfig},
     webhook::{Dispatcher, WebhookConfig},
 };
 
@@ -35,7 +36,17 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     )
     .await?;
 
+    let ui = UiAsset::new(UiConfig {
+        enabled: cfg.ui_enabled,
+        auto_update: cfg.ui_auto_update,
+        repo: cfg.ui_repo.clone(),
+        asset_name: cfg.ui_asset_name.clone(),
+        cache_dir: PathBuf::from("storages/ui"),
+    });
+    ui.start();
+
     let state = AppState {
+        ui,
         credentials: Arc::new(credentials),
         devices: devices.clone(),
         settings: Arc::new(Settings {

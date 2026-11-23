@@ -276,7 +276,9 @@ mod network_tests {
     async fn live_link_preview() {
         let (p, _) = super::link_preview("https://example.com").await.unwrap();
         assert_eq!(p.title, "Example Domain");
-        let f = super::download("https://example.com/", 1_000_000).await.unwrap();
+        let f = super::download("https://example.com/", 1_000_000)
+            .await
+            .unwrap();
         assert!(String::from_utf8_lossy(&f.bytes).contains("Example Domain"));
     }
 }

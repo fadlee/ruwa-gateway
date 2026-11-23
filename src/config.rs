@@ -111,6 +111,26 @@ pub struct Config {
     #[arg(long = "account-validation", env = "WHATSAPP_ACCOUNT_VALIDATION", default_value_t = true, action = clap::ArgAction::Set)]
     pub account_validation: bool,
 
+    #[arg(long = "ui-enabled", env = "APP_UI_ENABLED", default_value_t = true, action = clap::ArgAction::Set)]
+    pub ui_enabled: bool,
+
+    #[arg(long = "ui-auto-update", env = "APP_UI_AUTO_UPDATE", default_value_t = true, action = clap::ArgAction::Set)]
+    pub ui_auto_update: bool,
+
+    #[arg(
+        long = "ui-repo",
+        env = "APP_UI_REPO",
+        default_value = "aldinokemal/gowa-ui"
+    )]
+    pub ui_repo: String,
+
+    #[arg(
+        long = "ui-asset-name",
+        env = "APP_UI_ASSET_NAME",
+        default_value = "gowa-ui.html"
+    )]
+    pub ui_asset_name: String,
+
     /// Only SQLite is supported in v1.
     #[arg(
         long = "db-uri",

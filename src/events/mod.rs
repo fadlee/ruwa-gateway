@@ -444,6 +444,7 @@ fn other_types(msg: &proto::Message, p: &mut Map<String, Value>) {
 
 pub const CHAT_PRESENCE: &str = "chat_presence";
 pub const DEVICE_TEMPORARY_BAN: &str = "device.temporary_ban";
+pub const PRESENCE: &str = "presence";
 pub const CALL_OFFER: &str = "call.offer";
 pub const GROUP_PARTICIPANTS: &str = "group.participants";
 pub const GROUP_INFO: &str = "group.info";
@@ -677,6 +678,36 @@ pub fn device_envelope(
         env.insert("device_id".into(), jid.into());
     }
     env
+}
+
+/// Online/offline of a subscribed contact (GOWA `createPresencePayload`).
+/// `last_seen` is omitted when unknown (hidden by the contact).
+pub async fn presence_envelope<R: Resolver>(
+    r: &R,
+    from: &Jid,
+    available: bool,
+    last_seen: Option<i64>,
+    device_id: &str,
+    now: i64,
+) -> Map<String, Value> {
+    let mut p = Map::new();
+    if from.is_lid() {
+        p.insert("from_lid".into(), wa::jid::non_ad_string(from).into());
+    }
+    p.insert("from".into(), normalize(r, from).await.to_string().into());
+    p.insert(
+        "state".into(),
+        if available {
+            "available"
+        } else {
+            "unavailable"
+        }
+        .into(),
+    );
+    if let Some(seen) = last_seen {
+        p.insert("last_seen".into(), rfc3339(seen).into());
+    }
+    group_envelope(PRESENCE, device_id, now, Value::Object(p))
 }
 
 /// Incoming call (GOWA `createCallOfferPayload`).

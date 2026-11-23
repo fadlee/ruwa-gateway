@@ -6,8 +6,8 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence|poll` selesai; `/user/*`, `/call/reject`, `call.offer` + auto-reject selesai; auto reply + auto mark read selesai; berikutnya event label/presence/`message.deleted`.
-- **Build**: `cargo test` (167 test: 123 unit + 44 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence|poll` selesai; `/user/*`, `/call/reject`, `call.offer` + auto-reject selesai; auto reply + auto mark read selesai; event `presence` selesai; berikutnya `message.deleted`, event label, presence pulse.
+- **Build**: `cargo test` (168 test: 124 unit + 44 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -44,7 +44,7 @@
    Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
    `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
    `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
-2. Fase 3 lanjutan: event label/presence/`message.deleted`, auto reply/mark read/reject call.
+2. Fase 3 lanjutan: `message.deleted`, event label, presence pulse, auto reply/mark read/reject call.
 
 ## Keputusan yang sudah diambil
 
@@ -90,6 +90,7 @@
 
 ## Catatan / jebakan
 
+- Event `presence`: `timestamp` = waktu proses (GOWA `time.Now()`), `last_seen` hanya bila SDK memberi nilai. WhatsApp hanya mengirimnya untuk kontak yang sudah di-subscribe (`/user/presence/subscribe`) dan selama akun berstatus *available*; presence pulse/`WHATSAPP_PRESENCE_ON_CONNECT` belum ada, jadi event bisa jarang muncul (lihat catatan `chat_presence`).
 - Auto reply/mark read ada di `device/processor.rs` (`auto_reply`, `auto_mark_read`), dijalankan setelah pesan masuk disimpan dan sebelum webhook (urutan GOWA). Auto-reply hanya untuk chat 1:1 (`@s.whatsapp.net`/`@lid`), teks ketikan asli (bukan caption; edit teks dihitung), bukan pesan sendiri; balasan dikirim ke `sender` dan disimpan ke chat storage. Mark read memakai waktu sekarang dan, di grup, menyebut pengirim. Balasan otomatis tidak memakai chat-presence/jeda apa pun; tidak ada pencegahan loop selain filter di atas (dua akun dengan auto-reply saling membalas bisa berputar — GOWA sama).
 - Call: `call.offer` hanya dari `CallAction::Offer` (`MissedCall` dari offline queue tidak dikirim; GOWA/whatsmeow juga hanya `CallOffer`). `from` = `call_creator`; auto-reject memakai `voip().reject_call(call_id, from, creator)` dengan timeout 10 dtk, gagal → `auto_rejected:false`. `/call/reject` memakai caller_jid sebagai `peer` dan `creator` (SDK memisahkan keduanya untuk companion-device). Panggilan masuk belum disimpan sebagai baris `media_type = call`.
 - `/user/business-profile`: jam buka `HH:MM` dihitung dari **menit** sejak tengah malam (540 → `09:00`); GOWA membagi 100 (`FormatBusinessHourTime`) sehingga 540 jadi `05:40` — kami sengaja tidak meniru bug itu. Waktu kosong → `00:00` (nilai nol Go). `profile_options` berisi `description`/`website` (SDK tak mengekspos flag commerce whatsmeow), `null` bila kosong. Bukan akun bisnis → 500 `business profile not found`.
@@ -150,6 +151,9 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — Fase 3: event `presence`
+- `events::presence_envelope`, handler `Event::Presence` di `processor.rs` (+ `EventKind::Presence`). Test: golden `presence_events` (dua contoh dokumen + LID). Belum diuji dengan akun live (cek: subscribe kontak → buka/tutup WhatsApp di HP kontak).
 
 ### 2026-11-24 — Fase 3: auto reply, auto mark read
 - `WHATSAPP_AUTO_REPLY` dan `WHATSAPP_AUTO_MARK_READ` mengalir config → `DeviceOptions` → `MediaSettings`; handler di `processor.rs`. Doc-comment `add_session_id` yang tersangkut di atas fungsi lain dirapikan. Test: unit `typed_text_detection`. Belum diuji dengan akun live (cek: kirim teks ke akun → balasan otomatis + centang biru; grup tidak dibalas).

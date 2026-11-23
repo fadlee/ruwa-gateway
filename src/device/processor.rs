@@ -61,6 +61,7 @@ const KINDS: &[EventKind] = &[
     EventKind::ContactUpdate,
     EventKind::GroupUpdate,
     EventKind::IncomingCall,
+    EventKind::Presence,
 ];
 
 impl EventHandler for Relay {
@@ -358,6 +359,24 @@ async fn handle(
             {
                 tracing::warn!(device = %device.id(), %error, "failed to store contact");
             }
+        }
+        Event::Presence(update) => {
+            use crate::wa::sdk::wacore::types::presence::PresenceStatus;
+            let Some(client) = device.client() else {
+                return;
+            };
+            let resolver = ClientResolver::new(client, media.clone(), device);
+            let mut env = events::presence_envelope(
+                &resolver,
+                &update.from,
+                matches!(update.status, PresenceStatus::Available),
+                update.last_seen.map(|t| t.as_secs()),
+                &device.jid().unwrap_or_default(),
+                super::now(),
+            )
+            .await;
+            add_session_id(device, &mut env);
+            webhook.send(events::PRESENCE, env, &device.webhook());
         }
         Event::IncomingCall(call) => {
             incoming_call(device, call, webhook, media).await;

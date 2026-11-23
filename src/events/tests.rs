@@ -645,3 +645,51 @@ async fn call_offer_events() {
     assert!(bare["payload"].get("remote_platform").is_none());
     assert!(bare["payload"].get("remote_version").is_none());
 }
+
+#[tokio::test]
+async fn presence_events() {
+    let r = FakeResolver::new(&[("251556368777322", "628987654321")]);
+    let device = "628123456789@s.whatsapp.net";
+    let section = DOC
+        .split("## Presence Events")
+        .nth(1)
+        .and_then(|s| s.split("### Presence Event Fields").next())
+        .unwrap();
+    let blocks: Vec<Value> = section
+        .split("```json")
+        .skip(1)
+        .map(|b| b.split("```").next().unwrap().trim())
+        .filter(|b| b.contains("\"event\": \"presence\""))
+        .map(|b| serde_json::from_str(b).unwrap())
+        .collect();
+    assert_eq!(blocks.len(), 2);
+
+    let offline = presence_envelope(
+        &r,
+        &jid("628987654321@s.whatsapp.net"),
+        false,
+        Some(secs("2026-01-22T12:04:35Z")),
+        device,
+        secs("2026-01-22T12:05:00Z"),
+    )
+    .await;
+    assert_matches_doc(&Value::Object(offline), &blocks[0]);
+
+    // LID sender is resolved and reported; no last_seen when hidden.
+    let online = presence_envelope(
+        &r,
+        &jid("251556368777322@lid"),
+        true,
+        None,
+        device,
+        secs("2026-01-22T12:10:00Z"),
+    )
+    .await;
+    assert_eq!(online["payload"]["from_lid"], "251556368777322@lid");
+    let mut online = Value::Object(online);
+    online["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("from_lid");
+    assert_matches_doc(&online, &blocks[1]);
+}

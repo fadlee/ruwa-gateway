@@ -920,6 +920,20 @@ impl ChatStore {
         Ok(())
     }
 
+    /// Every stored contact of a device, sorted by JID.
+    pub async fn all_contacts(&self, device: &str) -> anyhow::Result<Vec<Contact>> {
+        let device = device.to_owned();
+        self.db
+            .run(move |c| {
+                contacts::table
+                    .filter(contacts::device_id.eq(&device))
+                    .order(contacts::jid.asc())
+                    .select(Contact::as_select())
+                    .load(c)
+            })
+            .await
+    }
+
     /// Contacts among `jids`, keyed by JID.
     pub async fn contacts(
         &self,
@@ -1056,6 +1070,28 @@ mod tests {
             last_message_time: last,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn all_contacts_sorted_and_device_scoped() {
+        let s = store();
+        let saved = |first: &str, full: &str| ContactName::Saved {
+            first: first.into(),
+            full: full.into(),
+        };
+        s.set_contact_name(DEV, "b@s.whatsapp.net", saved("B", "Bee"))
+            .await
+            .unwrap();
+        s.set_contact_name(DEV, "a@s.whatsapp.net", ContactName::Push("Ay".into()))
+            .await
+            .unwrap();
+        s.set_contact_name("other", "c@s.whatsapp.net", ContactName::Push("Cee".into()))
+            .await
+            .unwrap();
+        let all = s.all_contacts(DEV).await.unwrap();
+        let jids: Vec<_> = all.iter().map(|c| c.jid.as_str()).collect();
+        assert_eq!(jids, ["a@s.whatsapp.net", "b@s.whatsapp.net"]);
+        assert_eq!(all[1].full_name, "Bee");
     }
 
     #[tokio::test]

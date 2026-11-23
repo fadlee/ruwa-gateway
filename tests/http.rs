@@ -599,6 +599,31 @@ async fn user_my_groups_requires_login() {
 }
 
 #[tokio::test]
+async fn user_profile_endpoints_require_login() {
+    let h = harness().await;
+    for path in [
+        "/user/my/privacy",
+        "/user/my/contacts",
+        "/user/my/contacts/detailed",
+    ] {
+        let (status, body) = call(&h.app, get(path)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        assert_eq!(body["code"], "AUTHENTICATION_ERROR", "{path}");
+    }
+    let (status, body) = call(
+        &h.app,
+        post_json("/user/pushname", r#"{"push_name":"Ruwa"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "AUTHENTICATION_ERROR");
+    // GOWA binds the body first: a broken one is a 500, before the login check.
+    let (status, body) = call(&h.app, post_json("/user/pushname", "{not json")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["code"], "INTERNAL_SERVER_ERROR");
+}
+
+#[tokio::test]
 async fn dashboard_falls_back_when_not_downloaded() {
     let h = harness().await;
     let (status, body) = raw(&h.app, get("/")).await;

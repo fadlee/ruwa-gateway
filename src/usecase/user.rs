@@ -1,12 +1,23 @@
 //! `/user/check` and `/user/info` (GOWA `usecase/user.go`).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
-use super::send::{must_login, required, resolve_recipient};
+use super::{
+    names,
+    send::{must_login, required, resolve_recipient},
+};
 use crate::{
     device::DeviceInstance,
     error::{ApiError, ApiResult},
-    wa::{Jid, jid},
+    storage::chat::Contact,
+    wa::{
+        Jid, Server, jid,
+        sdk::{
+            PushNameOutcome,
+            privacy_settings::{PrivacyCategory, PrivacyValue},
+        },
+    },
 };
 
 #[derive(Debug, Serialize)]
@@ -166,6 +177,158 @@ pub async fn info(
     Ok(response)
 }
 
+/// `GET /user/my/privacy` (GOWA `MyPrivacySetting`). GOWA never fills
+/// `last_seen`, so it is always empty; a setting the server left out is empty too.
+pub async fn my_privacy(device: &DeviceInstance) -> ApiResult<Value> {
+    let client = must_login(device)?;
+    let settings = client
+        .fetch_privacy_settings()
+        .await
+        .map_err(ApiError::internal)?;
+    let value = |category: PrivacyCategory| {
+        settings
+            .get_value(&category)
+            .map(privacy_value)
+            .unwrap_or_default()
+    };
+    Ok(json!({
+        "group_add": value(PrivacyCategory::GroupAdd),
+        "last_seen": "",
+        "status": value(PrivacyCategory::Status),
+        "profile": value(PrivacyCategory::Profile),
+        "read_receipts": value(PrivacyCategory::ReadReceipts),
+    }))
+}
+
+fn privacy_value(value: &PrivacyValue) -> String {
+    match value {
+        PrivacyValue::All => "all".into(),
+        PrivacyValue::Contacts => "contacts".into(),
+        PrivacyValue::None => "none".into(),
+        PrivacyValue::ContactBlacklist => "contact_blacklist".into(),
+        PrivacyValue::MatchLastSeen => "match_last_seen".into(),
+        PrivacyValue::Known => "known".into(),
+        PrivacyValue::Off => "off".into(),
+        PrivacyValue::OnStandard => "on_standard".into(),
+        PrivacyValue::Other(other) => other.clone(),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PushNameRequest {
+    #[serde(default)]
+    pub push_name: String,
+}
+
+/// `POST /user/pushname` (GOWA `ChangePushName`; no validation there). An empty
+/// name is refused by whatsapp-rust and surfaces as a 500.
+pub async fn change_push_name(device: &DeviceInstance, req: PushNameRequest) -> ApiResult<()> {
+    let client = must_login(device)?;
+    let outcome = client
+        .profile()
+        .set_push_name(&req.push_name)
+        .await
+        .map_err(ApiError::internal)?;
+    // GOWA returns the app-state error; the name is only half applied then.
+    if let PushNameOutcome::SyncPending { source } = outcome {
+        return Err(ApiError::internal(source));
+    }
+    Ok(())
+}
+
+/// Go marshals a nil slice as `null`.
+fn data_or_null(rows: Vec<Value>) -> Value {
+    json!({ "data": if rows.is_empty() { Value::Null } else { Value::Array(rows) } })
+}
+
+/// `GET /user/my/contacts` (GOWA `MyListContacts`): the contact store with one
+/// preferred display name each. GOWA iterates a Go map (random order); we sort.
+pub async fn my_contacts(device: &DeviceInstance) -> ApiResult<Value> {
+    must_login(device)?;
+    let contacts = device
+        .chats()
+        .all_contacts(&device.storage_partition())
+        .await
+        .map_err(ApiError::internal)?;
+    let rows = contacts
+        .iter()
+        .map(|c| json!({ "jid": c.jid, "name": names::preferred_contact_name(Some(c), "") }))
+        .collect();
+    Ok(data_or_null(rows))
+}
+
+/// whatsmeow `Jid.IsBot` for phone-number JIDs (Meta AI and friends).
+fn is_bot(jid: &Jid) -> bool {
+    jid.server == Server::Pn
+        && jid.device == 0
+        && (jid.user.starts_with("1313555") || jid.user.starts_with("131655500"))
+}
+
+fn non_blank(value: &str) -> Option<&str> {
+    (!value.trim().is_empty()).then_some(value)
+}
+
+/// Person contacts keyed without device part, sorted by JID: phone-number and
+/// LID keys only, no bots; of keys differing in the device part the bare key
+/// wins, else the lowest device.
+fn person_contacts(contacts: &[Contact]) -> Vec<(String, &Contact)> {
+    let mut chosen: std::collections::BTreeMap<String, (u16, &Contact)> = Default::default();
+    for contact in contacts {
+        let Ok(parsed) = contact.jid.parse::<Jid>() else {
+            continue;
+        };
+        if !(parsed.server == Server::Pn || parsed.is_lid()) || is_bot(&parsed) {
+            continue;
+        }
+        let key = parsed.to_non_ad().to_string();
+        if chosen
+            .get(&key)
+            .is_none_or(|(device, _)| parsed.device < *device)
+        {
+            chosen.insert(key, (parsed.device, contact));
+        }
+    }
+    chosen.into_iter().map(|(k, (_, c))| (k, c)).collect()
+}
+
+/// `GET /user/my/contacts/detailed` (GOWA `buildDetailedContacts`): person
+/// contacts only (phone-number and LID keys, no bots), each name in its own
+/// field and omitted when blank, `lid` only for a phone-number key the LID
+/// store maps, one row per user (key without device part wins, else the lowest
+/// device), sorted by `jid`.
+pub async fn my_contacts_detailed(device: &DeviceInstance) -> ApiResult<Value> {
+    let client = must_login(device)?;
+    let contacts = device
+        .chats()
+        .all_contacts(&device.storage_partition())
+        .await
+        .map_err(ApiError::internal)?;
+    let chosen = person_contacts(&contacts);
+    let mut rows = Vec::with_capacity(chosen.len());
+    for (key, c) in chosen {
+        let mut row = serde_json::Map::new();
+        row.insert("jid".into(), json!(key));
+        if key.ends_with("@s.whatsapp.net")
+            && let Ok(parsed) = key.parse::<Jid>()
+            && let Ok(Some(entry)) = client.get_lid_pn_entry(&parsed).await
+        {
+            row.insert("lid".into(), json!(format!("{}@lid", entry.lid)));
+        }
+        for (field, value) in [
+            ("full_name", &c.full_name),
+            ("first_name", &c.first_name),
+            ("push_name", &c.push_name),
+            ("business_name", &c.business_name),
+        ] {
+            if let Some(v) = non_blank(value) {
+                row.insert(field.into(), json!(v));
+            }
+        }
+        rows.push(Value::Object(row));
+    }
+    Ok(data_or_null(rows))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +341,54 @@ mod tests {
         assert_eq!(d.Device, "IE");
         let v = serde_json::to_value(&d).unwrap();
         assert!(v.get("User").is_some() && v.get("AD").is_some());
+    }
+
+    fn contact(jid: &str, full: &str) -> Contact {
+        Contact {
+            jid: jid.into(),
+            full_name: full.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn person_contacts_filter_dedupe_and_sort() {
+        let all = [
+            contact("628222@s.whatsapp.net", "Bob"),
+            contact("628111:5@s.whatsapp.net", "Alice device 5"),
+            contact("628111:2@s.whatsapp.net", "Alice device 2"),
+            contact("628111@s.whatsapp.net", "Alice"),
+            contact("999@lid", "Lid person"),
+            contact("1203@g.us", "A group"),
+            contact("status@broadcast", "Broadcast"),
+            contact("13135550123@s.whatsapp.net", "Meta AI"),
+            contact("not a jid", "Junk"),
+        ];
+        let rows = person_contacts(&all);
+        let keys: Vec<_> = rows.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["628111@s.whatsapp.net", "628222@s.whatsapp.net", "999@lid"]
+        );
+        // The bare key beats any device-suffixed one.
+        assert_eq!(rows[0].1.full_name, "Alice");
+
+        let no_bare = [
+            contact("628111:5@s.whatsapp.net", "five"),
+            contact("628111:2@s.whatsapp.net", "two"),
+        ];
+        assert_eq!(person_contacts(&no_bare)[0].1.full_name, "two");
+    }
+
+    #[test]
+    fn privacy_values_use_wire_names() {
+        assert_eq!(
+            privacy_value(&PrivacyValue::ContactBlacklist),
+            "contact_blacklist"
+        );
+        assert_eq!(privacy_value(&PrivacyValue::All), "all");
+        assert_eq!(privacy_value(&PrivacyValue::Other("x".into())), "x");
+        assert_eq!(non_blank("  "), None);
+        assert_eq!(non_blank(" a "), Some(" a "));
     }
 }

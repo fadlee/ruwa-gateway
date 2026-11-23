@@ -21,6 +21,11 @@ async fn normalize<R: Resolver>(r: &R, jid: &Jid) -> Jid {
     jid.clone()
 }
 
+/// Name a group chat carries until its real subject is known.
+pub fn placeholder_group_name(jid: &Jid) -> String {
+    format!("Group {}", jid.user)
+}
+
 /// GOWA `GetChatNameWithPushNameByDevice`.
 pub fn chat_name(existing: Option<&Chat>, jid: &Jid, sender_user: &str, push_name: &str) -> String {
     if jid.to_string() == STATUS_BROADCAST {
@@ -34,7 +39,7 @@ pub fn chat_name(existing: Option<&Chat>, jid: &Jid, sender_user: &str, push_nam
         return chat.name.clone();
     }
     match jid.server {
-        Server::Group => format!("Group {}", jid.user),
+        Server::Group => placeholder_group_name(jid),
         Server::Newsletter => format!("Newsletter {}", jid.user),
         _ => {
             if !push_name.is_empty() && push_name != sender_user && push_name != own_user {

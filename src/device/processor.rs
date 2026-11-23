@@ -18,7 +18,7 @@ use crate::{
     storage::chat::ChatStore,
     usecase::names,
     wa::{
-        Jid,
+        Jid, Server,
         sdk::prelude::{Client, Event, EventHandler, EventInterest, EventKind, InboundMessage},
     },
     webhook::Dispatcher,
@@ -126,6 +126,8 @@ async fn handle(
         Event::PairSuccess(ok) => {
             tracing::info!(device = %device.id(), jid = %ok.id, "paired");
             device.set_jid(Some(ok.id.to_non_ad().to_string())).await;
+            // A fresh link gets every contact with its first sync.
+            super::backfill::mark_contacts_resynced(device.dir());
             hub.publish(
                 "LOGIN_SUCCESS",
                 format!("Successfully pair with {}", ok.id),
@@ -143,6 +145,8 @@ async fn handle(
                 }
             }
             tracing::info!(device = %device.id(), "connected");
+            super::backfill::resync_contacts(device);
+            super::backfill::kick_group_names(device);
         }
         Event::Disconnected(d) => {
             tracing::info!(device = %device.id(), reason = ?d.reason, "disconnected");
@@ -180,6 +184,9 @@ async fn handle(
             let own = own_jid(&client);
             for inbound in batch.messages.iter() {
                 let m = incoming(inbound);
+                if m.chat.server == Server::Group {
+                    super::backfill::note_group_seen(device, &m.chat);
+                }
                 // Store first, like GOWA, so replies to it resolve at once.
                 if let Err(error) = ingest::store_incoming(
                     device.chats(),
@@ -307,6 +314,7 @@ async fn handle(
             {
                 tracing::error!(device = %device.id(), %error, "failed to store history sync");
             }
+            super::backfill::kick_group_names(device);
         }
         Event::ArchiveUpdate(update) => {
             let (Some(client), Some(archived)) = (device.client(), update.action.archived) else {

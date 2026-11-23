@@ -1,9 +1,10 @@
 //! One device slot: its whatsapp-rust `Bot`, pairing state, and identity.
 
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{
-        Arc, RwLock as StdRwLock,
+        Arc, Mutex as StdMutex, RwLock as StdRwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -58,6 +59,12 @@ pub struct DeviceInstance {
     pub(super) local_logout: AtomicBool,
     /// Serialises login/logout/reconnect (GOWA `lockLogin`).
     pub login_lock: Mutex<()>,
+    /// A group-name queue (`backfill`) is running for this device.
+    pub(super) group_names_running: AtomicBool,
+    /// A contact replay (`backfill`) is running for this device.
+    pub(super) contacts_resyncing: AtomicBool,
+    /// Groups already seen in this process; the first sighting kicks the queue.
+    pub(super) seen_groups: StdMutex<HashSet<String>>,
 }
 
 impl DeviceInstance {
@@ -82,6 +89,9 @@ impl DeviceInstance {
             pair: watch::channel(None).0,
             local_logout: AtomicBool::new(false),
             login_lock: Mutex::new(()),
+            group_names_running: AtomicBool::new(false),
+            contacts_resyncing: AtomicBool::new(false),
+            seen_groups: StdMutex::new(HashSet::new()),
         }
     }
 
@@ -225,6 +235,8 @@ impl DeviceInstance {
     pub async fn wipe_session(&self) {
         self.stop().await;
         remove_session_files(&self.dir.join(SESSION_DB));
+        super::backfill::clear_contacts_marker(&self.dir);
+        self.seen_groups.lock().expect("seen groups lock").clear();
         self.set_jid(None).await;
         self.qr.send_replace(None);
         self.pair.send_replace(None);

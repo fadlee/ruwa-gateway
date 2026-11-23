@@ -51,6 +51,7 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 - [x] `/message/{id}/*` (revoke, delete, reaction, update, read, played, star, forward, download)
 - [x] Semua `/group/*` (19 route: create/join/leave/info/participants/requests/photo/name/locked/announce/topic/invite-link/export CSV)
 - [x] `/user/my/groups`
+- [x] Backfill nama (pola zapfast): antrean nama grup (`device/backfill.rs`) + replay kontak sekali per link
 - [ ] Sisa `/user/*` (avatar, pushname, my/privacy, my/newsletters, my/contacts[/detailed], business-profile, presence/subscribe), `/send/sticker|poll|presence|chat-presence`, `/call/reject`
 - [ ] Event: `message.deleted`, `presence`, `group.*`, `label.*`, `call.offer`, `device.reachout_timelock`
 - [ ] Auto reply, auto mark read, auto reject call

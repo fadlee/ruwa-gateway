@@ -424,6 +424,52 @@ impl ChatStore {
             .await
     }
 
+    /// `(jid, name)` of every stored group chat of a device.
+    pub async fn group_chats(&self, device: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let device = device.to_owned();
+        self.db
+            .run(move |c| {
+                chats::table
+                    .filter(chats::device_id.eq(&device))
+                    .filter(chats::jid.like("%@g.us"))
+                    .order(chats::last_message_time.desc())
+                    .select((chats::jid, chats::name))
+                    .load(c)
+            })
+            .await
+    }
+
+    /// Rename a chat only while it still carries `expected` (so a name set
+    /// meanwhile by a message or history sync is never overwritten).
+    pub async fn rename_chat_if(
+        &self,
+        device: &str,
+        jid: &str,
+        expected: &str,
+        name: &str,
+    ) -> anyhow::Result<bool> {
+        let (device, jid, expected, name) = (
+            device.to_owned(),
+            jid.to_owned(),
+            expected.to_owned(),
+            name.to_owned(),
+        );
+        let now = crate::device::now();
+        let changed = self
+            .db
+            .run(move |c| {
+                diesel::update(
+                    chats::table
+                        .find((&jid, &device))
+                        .filter(chats::name.eq(&expected)),
+                )
+                .set((chats::name.eq(&name), chats::updated_at.eq(now)))
+                .execute(c)
+            })
+            .await?;
+        Ok(changed > 0)
+    }
+
     /// First stored chat among `keys` (GOWA `storedChat`).
     pub async fn first_chat(&self, device: &str, keys: &[String]) -> anyhow::Result<Option<Chat>> {
         for key in keys {
@@ -1010,6 +1056,39 @@ mod tests {
             last_message_time: last,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn group_chats_and_guarded_rename() {
+        let s = store();
+        s.store_chat(chat("1@g.us", "Group 1", 20)).await.unwrap();
+        s.store_chat(chat("2@g.us", "Team", 10)).await.unwrap();
+        s.store_chat(chat("a@s.whatsapp.net", "Alice", 30))
+            .await
+            .unwrap();
+        let groups = s.group_chats(DEV).await.unwrap();
+        assert_eq!(
+            groups,
+            vec![
+                ("1@g.us".to_owned(), "Group 1".to_owned()),
+                ("2@g.us".to_owned(), "Team".to_owned())
+            ]
+        );
+        assert!(
+            s.rename_chat_if(DEV, "1@g.us", "Group 1", "Family")
+                .await
+                .unwrap()
+        );
+        // The name moved on: a stale expectation must not overwrite it.
+        assert!(
+            !s.rename_chat_if(DEV, "1@g.us", "Group 1", "Other")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            s.get_chat(DEV, "1@g.us").await.unwrap().unwrap().name,
+            "Family"
+        );
     }
 
     #[tokio::test]

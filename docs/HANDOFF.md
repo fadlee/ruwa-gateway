@@ -7,7 +7,7 @@
 ## Status saat ini
 
 - **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups` selesai; berikutnya sisa `/user/*` (avatar, pushname, my/privacy, my/newsletters, my/contacts, business-profile, presence/subscribe), sticker/poll/presence, event grup.
-- **Build**: `cargo test` (136 test: 100 unit + 36 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Build**: `cargo test` (142 test: 106 unit + 36 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -15,7 +15,7 @@
 - **Belum terverifikasi live**: kirim media (upload ke CDN WhatsApp), webhook pesan masuk/media/receipt/presence,
   auto-download, `/user/*`, logout dari HP (`device.logged_out`), temp ban, **chat storage** (history sync setelah
   pair, pesan masuk/keluar tersimpan, reply setelah restart), `/chat/{jid}/pin|archive|disappearing|history`
-  (app-state/protocol ke WhatsApp), nama dari `ContactUpdate`, semua `/message/{id}/*` (revoke/edit/reaction/read/
+  (app-state/protocol ke WhatsApp), nama dari `ContactUpdate`, **backfill nama** (nama grup placeholder terisi, replay kontak `CriticalUnblockLow`), semua `/message/{id}/*` (revoke/edit/reaction/read/
   played/star/delete-for-me/forward/download), **semua `/group/*` dan `/user/my/groups`** (butuh akun yang ada di grup; admin untuk
   name/locked/announce/topic/photo/participants). Cek via gowa-ui menu Chats/Groups atau `GET /chats`.
 - **whatsapp-rust rev**: `94877bedb6cd473864f9f6b332a5c13d5fbef789`
@@ -83,6 +83,8 @@
 | 2026-11-23 | `/group/participants/{add,remove,promote,demote}`: error per peserta selain 403+`add_request` dilaporkan `status:"error"` (`Action failed (code N)`) | GOWA melaporkan semua itu `success` (menyesatkan); kasus 403 tetap persis GOWA |
 | 2026-11-23 | `/group/*` memakai `Body`/`Payload` (gagal bind → 500) dan `GET` list peserta/request/export menolak `group_id` kosong dengan 400 `INVALID_GROUP_ID` sebelum cek login | perilaku handler GOWA `ui/rest/group.go` |
 | 2026-11-23 | Peserta di body (`participants`) selalu ditempeli `@s.whatsapp.net` dan dicek `is_on_whatsapp` tanpa memedulikan `WHATSAPP_ACCOUNT_VALIDATION`; tak terdaftar → 400 `INVALID_JID` `user is not registered` | GOWA `participantToJID` |
+| 2026-11-24 | Nama grup placeholder (`Group <id>`) diisi antrean di `device/backfill.rs`: `fetch_metadata_batch` 20 grup/5 dtk, backoff 30 dtk ×2 (7 percobaan), `Forbidden`/`NotFound`/tanpa subjek final, rename hanya bila nama masih placeholder (`rename_chat_if`). Pemicu: `Connected`, selesai history sync, pertama kali grup terlihat di pesan | pola zapfast `pump_group_info`; burst query kena rate limit server dan grup tersangkut bernama "Group" |
+| 2026-11-24 | Kontak diputar ulang dari HP sekali per link lewat `resync_app_state([CriticalUnblockLow], Snapshot)`; marker file `contacts-resynced` di direktori slot (ditulis saat `PairSuccess` karena link baru sudah menerima kontak, dihapus di `wipe_session`) | pola zapfast `contact_names`; HP hanya mengirim kontak saat berubah, jadi sesi lama tak punya kontak |
 | 2026-11-24 | `/user/my/groups` = `list_participating` (id) + `fetch_metadata_batch` (chunk 200) → `GroupInfo` lengkap, 2 IQ berapa pun jumlah grup; tanpa grup → `data: null` | whatsmeow `GetJoinedGroups` mengembalikan peserta penuh; `list_participating` SDK hanya overview tanpa peserta, per-grup `fetch_metadata` = N IQ (risiko rate limit) |
 | 2026-11-23 | Foto grup: validasi (tipe/ukuran ≤10MB/format) → 400 `INVALID_IMAGE_FORMAT`; diproses crop persegi tengah, ≤640px, JPEG q80; tanpa file `photo` = hapus foto | GOWA `ValidateGroupPhotoFormat` + `ProcessGroupPhoto` |
 
@@ -137,6 +139,11 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — Backfill nama (pola zapfast)
+- `device/backfill.rs`: `fill_group_names` (generik atas trait `GroupNames`, dites dengan fake: batch, backoff lalu menyerah, tidak menimpa nama yang terisi di sela, berhenti saat device pergi), `kick_group_names`/`note_group_seen`, `resync_contacts` + marker. `storage/chat.rs`: `group_chats`, `rename_chat_if`. `ingest::placeholder_group_name` dipakai bersama `chat_name`.
+- Field baru `DeviceInstance`: `group_names_running`, `contacts_resyncing`, `seen_groups`. Belum diuji dengan akun live: pastikan setelah connect, `GET /chats` menampilkan nama grup asli dan `contacts` terisi (log `contacts replayed from the phone`).
+- Belum: event `GroupUpdate` (rename grup oleh orang lain) belum mengubah nama chat; peta LID→nomor dari `ContactUpdate`/`sender_alt` saat ingest (zapfast `learn_pair`) belum diadaptasi; `first_name` sudah tersimpan di `contacts`.
 
 ### 2026-11-24 — Fase 3: `/user/my/groups`
 - `usecase/group.rs`: `my_groups` (list_participating → fetch_metadata_batch per 200 id), `group_info_values` (dipakai bersama `info`: resolve LID→PN lalu satu query kontak untuk semua grup), `truncated_group_json`; `ParticipantCount` ditambah ke JSON `GroupInfo`. Route di `http/routes/user.rs`.

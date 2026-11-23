@@ -24,6 +24,8 @@ pub fn router() -> Router<AppState> {
         .route("/user/check", get(check))
         .route("/user/info", get(info))
         .route("/user/my/groups", get(my_groups))
+        .route("/user/my/newsletters", get(my_newsletters))
+        .route("/user/business-profile", get(business_profile))
         .route("/user/my/privacy", get(my_privacy))
         .route("/user/my/contacts", get(my_contacts))
         .route("/user/my/contacts/detailed", get(my_contacts_detailed))
@@ -117,4 +119,18 @@ async fn change_avatar(
         "Success change avatar",
         serde_json::Value::Null,
     ))
+}
+
+async fn my_newsletters(Extension(Device(device)): Extension<Device>) -> ApiResult<Response> {
+    let res = user::my_newsletters(&device).await?;
+    Ok(response::success("Success get list newsletter", res))
+}
+
+async fn business_profile(
+    State(state): State<AppState>,
+    Extension(Device(device)): Extension<Device>,
+    Query(q): Query<PhoneQuery>,
+) -> ApiResult<Response> {
+    let res = user::business_profile(&device, &q.phone, state.settings.account_validation).await?;
+    Ok(response::success("Success get business profile", res))
 }

@@ -669,3 +669,320 @@ mod tests {
         );
     }
 }
+
+/// One `business_hours` row as the SDK reports it.
+pub struct HoursRow<'a> {
+    pub day: &'a str,
+    pub mode: &'a str,
+    pub open: Option<u32>,
+    pub close: Option<u32>,
+}
+
+/// `HH:MM` from minutes past midnight. GOWA's `FormatBusinessHourTime`
+/// divides by 100 (it expects `HHMM`), which misreads WhatsApp's minutes
+/// (540 → "05:40"); minutes are the real unit, so "09:00" is what we print.
+/// An absent time is `00:00`, like GOWA's zero value.
+fn hhmm(minutes: Option<u32>) -> String {
+    let m = minutes.unwrap_or(0);
+    format!("{:02}:{:02}", m / 60, m % 60)
+}
+
+/// GOWA `BusinessProfileResponse`; empty collections are `null` (Go nil).
+#[allow(clippy::too_many_arguments)]
+fn business_profile_json(
+    jid: &str,
+    email: &str,
+    address: &str,
+    categories: &[(String, String)],
+    options: &[(&str, String)],
+    timezone: &str,
+    hours: &[HoursRow<'_>],
+) -> Value {
+    let or_null = |v: Vec<Value>| {
+        if v.is_empty() {
+            Value::Null
+        } else {
+            Value::Array(v)
+        }
+    };
+    let options: serde_json::Map<String, Value> = options
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| ((*k).to_owned(), json!(v)))
+        .collect();
+    json!({
+        "jid": jid,
+        "email": email,
+        "address": address,
+        "categories": or_null(categories.iter().map(|(id, name)| json!({"id": id, "name": name})).collect()),
+        "profile_options": if options.is_empty() { Value::Null } else { Value::Object(options) },
+        "business_hours_timezone": timezone,
+        "business_hours": or_null(hours.iter().map(|h| json!({
+            "day_of_week": h.day,
+            "mode": h.mode,
+            "open_time": hhmm(h.open),
+            "close_time": hhmm(h.close),
+        })).collect()),
+    })
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct BusinessProfileQuery {
+    pub phone: String,
+}
+
+/// `GET /user/business-profile` (GOWA `BusinessProfile`). `profile_options`
+/// carries `description` and `website` (the SDK does not expose whatsmeow's
+/// commerce flags).
+pub async fn business_profile(
+    device: &DeviceInstance,
+    phone: &str,
+    account_validation: bool,
+) -> ApiResult<Value> {
+    let phone = jid::sanitize_phone(phone);
+    required(&[("phone", &phone)])?;
+    let client = must_login(device)?;
+    let target = resolve_recipient(&client, &phone, account_validation).await?;
+    let profile = client
+        .get_business_profile(&target)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::internal("business profile not found"))?;
+    let categories: Vec<(String, String)> = profile
+        .categories
+        .iter()
+        .map(|c| (c.id.clone(), c.name.clone()))
+        .collect();
+    let configs = profile
+        .business_hours
+        .business_config
+        .as_deref()
+        .unwrap_or(&[]);
+    let hours: Vec<HoursRow<'_>> = configs
+        .iter()
+        .map(|c| HoursRow {
+            day: c.day_of_week.as_str(),
+            mode: c.mode.as_str(),
+            open: c.open_time,
+            close: c.close_time,
+        })
+        .collect();
+    Ok(business_profile_json(
+        &target.to_string(),
+        profile.email.as_deref().unwrap_or_default(),
+        profile.address.as_deref().unwrap_or_default(),
+        &categories,
+        &[
+            ("description", profile.description.clone()),
+            ("website", profile.website.join(", ")),
+        ],
+        profile
+            .business_hours
+            .timezone
+            .as_deref()
+            .unwrap_or_default(),
+        &hours,
+    ))
+}
+
+/// Plain view of a channel for [`newsletter_json`].
+pub struct ChannelView<'a> {
+    pub id: String,
+    pub state: &'a str,
+    pub creation_time: Option<u64>,
+    pub invite: &'a str,
+    pub name: &'a str,
+    pub description: &'a str,
+    pub subscribers: u64,
+    pub verification: &'a str,
+    pub picture_url: Option<&'a str>,
+    pub preview_url: Option<&'a str>,
+    pub mute: Option<&'a str>,
+    pub role: Option<&'a str>,
+}
+
+/// whatsmeow `types.NewsletterMetadata` JSON (the shape in the OpenAPI
+/// `Newsletter` schema). Fields the SDK does not expose are empty strings.
+fn newsletter_json(c: &ChannelView<'_>) -> Value {
+    let text = |t: &str| json!({"text": t, "id": "", "update_time": ""});
+    let image = |url: Option<&str>, kind: &str| match url {
+        Some(url) => json!({"url": url, "id": "", "type": kind, "direct_path": ""}),
+        None => Value::Null,
+    };
+    json!({
+        "id": c.id,
+        "state": {"type": c.state},
+        "thread_metadata": {
+            "creation_time": c.creation_time.map(|t| t.to_string()).unwrap_or_default(),
+            "invite": c.invite,
+            "name": text(c.name),
+            "description": text(c.description),
+            "subscribers_count": c.subscribers.to_string(),
+            "verification": c.verification,
+            "picture": image(c.picture_url, "IMAGE"),
+            "preview": image(c.preview_url, "PREVIEW"),
+            "settings": {"reaction_codes": {"value": ""}},
+        },
+        "viewer_metadata": match (c.mute, c.role) {
+            (None, None) => Value::Null,
+            (mute, role) => json!({"mute": mute.unwrap_or_default(), "role": role.unwrap_or_default()}),
+        },
+    })
+}
+
+/// `GET /user/my/newsletters` (GOWA `MyListNewsletter`): subscribed channels,
+/// filling a missing subscriber count with one detail query (5 at a time,
+/// 5 s each; GOWA runs a sliding window, we run batches of 5).
+pub async fn my_newsletters(device: &DeviceInstance) -> ApiResult<Value> {
+    use crate::wa::sdk::{NewsletterRole, NewsletterState, features::NewsletterVerification};
+
+    let client = must_login(device)?;
+    let mut channels = client
+        .newsletter()
+        .list_subscribed()
+        .await
+        .map_err(ApiError::internal)?;
+    let missing: Vec<(usize, Jid)> = channels
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.subscriber_count == 0)
+        .map(|(i, c)| (i, c.jid.clone()))
+        .collect();
+    let mut counts: Vec<(usize, u64)> = Vec::new();
+    for chunk in missing.chunks(5) {
+        let mut set = tokio::task::JoinSet::new();
+        for (i, jid) in chunk.iter().cloned() {
+            let client = client.clone();
+            set.spawn(async move {
+                let detail = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    client.newsletter().get_metadata(&jid),
+                )
+                .await;
+                match detail {
+                    Ok(Ok(meta)) => Some((i, meta.subscriber_count)),
+                    _ => None,
+                }
+            });
+        }
+        while let Some(done) = set.join_next().await {
+            if let Ok(Some(entry)) = done {
+                counts.push(entry);
+            }
+        }
+    }
+    for (i, count) in counts {
+        channels[i].subscriber_count = count;
+    }
+
+    let rows: Vec<Value> = channels
+        .iter()
+        .map(|c| {
+            let state = match &c.state {
+                NewsletterState::Active => "active".to_owned(),
+                NewsletterState::Suspended => "suspended".to_owned(),
+                NewsletterState::Geosuspended => "geosuspended".to_owned(),
+                NewsletterState::Other(s) => s.to_lowercase(),
+                _ => String::new(),
+            };
+            let verification = match &c.verification {
+                NewsletterVerification::Verified => "verified".to_owned(),
+                NewsletterVerification::Unverified => "unverified".to_owned(),
+                NewsletterVerification::Other(s) => s.to_lowercase(),
+                _ => String::new(),
+            };
+            let role = c.role.as_ref().map(|r| match r {
+                NewsletterRole::Owner => "owner",
+                NewsletterRole::Admin => "admin",
+                NewsletterRole::Subscriber => "subscriber",
+                _ => "guest",
+            });
+            let mute = c.muted.map(|m| if m { "on" } else { "off" });
+            newsletter_json(&ChannelView {
+                id: c.jid.to_string(),
+                state: &state,
+                creation_time: c.creation_time,
+                invite: c.invite_code.as_deref().unwrap_or_default(),
+                name: &c.name,
+                description: c.description.as_deref().unwrap_or_default(),
+                subscribers: c.subscriber_count,
+                verification: &verification,
+                picture_url: c.picture_url.as_deref(),
+                preview_url: c.preview_url.as_deref(),
+                mute,
+                role,
+            })
+        })
+        .collect();
+    Ok(data_or_null(rows))
+}
+
+#[cfg(test)]
+mod business_tests {
+    use super::*;
+
+    #[test]
+    fn business_profile_shape() {
+        let v = business_profile_json(
+            "6289685028129@s.whatsapp.net",
+            "b@example.com",
+            "Street 1",
+            &[("1".into(), "Retail".into())],
+            &[("description", "Shop".into()), ("website", String::new())],
+            "Asia/Jakarta",
+            &[
+                HoursRow {
+                    day: "mon",
+                    mode: "specific_hours",
+                    open: Some(540),
+                    close: Some(1020),
+                },
+                HoursRow {
+                    day: "tue",
+                    mode: "open_24h",
+                    open: None,
+                    close: None,
+                },
+            ],
+        );
+        assert_eq!(v["categories"][0], json!({"id": "1", "name": "Retail"}));
+        assert_eq!(v["profile_options"], json!({"description": "Shop"}));
+        assert_eq!(v["business_hours"][0]["open_time"], "09:00");
+        assert_eq!(v["business_hours"][0]["close_time"], "17:00");
+        assert_eq!(v["business_hours"][1]["open_time"], "00:00");
+
+        let empty = business_profile_json("j", "", "", &[], &[], "", &[]);
+        assert!(empty["categories"].is_null());
+        assert!(empty["profile_options"].is_null());
+        assert!(empty["business_hours"].is_null());
+    }
+
+    #[test]
+    fn newsletter_shape() {
+        let v = newsletter_json(&ChannelView {
+            id: "120363144038483540@newsletter".into(),
+            state: "active",
+            creation_time: Some(1_688_746_895),
+            invite: "0029Va",
+            name: "WhatsApp",
+            description: "Official",
+            subscribers: 12,
+            verification: "verified",
+            picture_url: Some("https://x/p.jpg"),
+            preview_url: None,
+            mute: Some("off"),
+            role: Some("subscriber"),
+        });
+        assert_eq!(v["state"]["type"], "active");
+        assert_eq!(v["thread_metadata"]["creation_time"], "1688746895");
+        assert_eq!(v["thread_metadata"]["name"]["text"], "WhatsApp");
+        assert_eq!(v["thread_metadata"]["subscribers_count"], "12");
+        assert_eq!(v["thread_metadata"]["picture"]["type"], "IMAGE");
+        assert!(v["thread_metadata"]["preview"].is_null());
+        assert_eq!(
+            v["viewer_metadata"],
+            json!({"mute": "off", "role": "subscriber"})
+        );
+    }
+}

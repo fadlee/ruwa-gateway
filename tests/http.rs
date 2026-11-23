@@ -1470,3 +1470,20 @@ async fn send_poll_contract() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(resp["code"], "AUTHENTICATION_ERROR");
 }
+
+#[tokio::test]
+async fn user_business_and_newsletters_contract() {
+    let h = harness().await;
+    let (status, body) = call(&h.app, get("/user/business-profile")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "VALIDATION_ERROR");
+    assert_eq!(body["message"], "phone: cannot be blank.");
+    for path in [
+        "/user/business-profile?phone=628123",
+        "/user/my/newsletters",
+    ] {
+        let (status, body) = call(&h.app, get(path)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        assert_eq!(body["code"], "AUTHENTICATION_ERROR", "{path}");
+    }
+}

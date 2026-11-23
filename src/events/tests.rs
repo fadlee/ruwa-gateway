@@ -615,3 +615,33 @@ fn group_joined_shape() {
         json!({"chat_id":"120363402106@g.us","type":"join","jids":["628123456789@s.whatsapp.net"],"reason":"invite","group_name":"Team"})
     );
 }
+
+#[tokio::test]
+async fn call_offer_events() {
+    let r = FakeResolver::new(&[]);
+    let mut view = CallOfferView {
+        call_id: "ABC123DEF456".into(),
+        from: jid("628987654321@s.whatsapp.net"),
+        auto_rejected: false,
+        platform: "android".into(),
+        version: "2.24.1.5".into(),
+        group: None,
+    };
+    let device = "628123456789@s.whatsapp.net";
+    let ts = secs("2026-02-05T12:00:00Z");
+    let actual = Value::Object(call_offer_envelope(&r, &view, device, ts).await);
+    assert_matches_doc(&actual, &doc_example("Call Offer"));
+
+    view.auto_rejected = true;
+    view.group = Some(jid("120363402106@g.us"));
+    let actual = Value::Object(call_offer_envelope(&r, &view, device, ts).await);
+    let mut expected = doc_example("Call Offer with Auto-Reject Enabled");
+    expected["payload"]["group_jid"] = json!("120363402106@g.us");
+    assert_matches_doc(&actual, &expected);
+
+    view.platform.clear();
+    view.version.clear();
+    let bare = call_offer_envelope(&r, &view, device, ts).await;
+    assert!(bare["payload"].get("remote_platform").is_none());
+    assert!(bare["payload"].get("remote_version").is_none());
+}

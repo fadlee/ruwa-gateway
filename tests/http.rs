@@ -49,6 +49,7 @@ async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Har
             os: "Chrome".into(),
             media_dir: dir.path().join("statics/media"),
             auto_download_media: true,
+            auto_reject_call: false,
         },
         db.clone(),
         Dispatcher::new(WebhookConfig::default()).unwrap(),
@@ -1486,4 +1487,31 @@ async fn user_business_and_newsletters_contract() {
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
         assert_eq!(body["code"], "AUTHENTICATION_ERROR", "{path}");
     }
+}
+
+#[tokio::test]
+async fn call_reject_contract() {
+    let h = harness().await;
+    expect_validation(
+        &h,
+        post_json("/call/reject", "{}"),
+        "call_id: cannot be blank; caller_jid: cannot be blank.",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json("/call/reject", r#"{"caller_jid":"  ","call_id":"A"}"#),
+        "caller_jid: cannot be blank.",
+    )
+    .await;
+    let (status, body) = call(
+        &h.app,
+        post_json(
+            "/call/reject",
+            r#"{"caller_jid":"628987654321@s.whatsapp.net","call_id":"A"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "AUTHENTICATION_ERROR");
 }

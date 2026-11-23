@@ -60,6 +60,7 @@ const KINDS: &[EventKind] = &[
     EventKind::ArchiveUpdate,
     EventKind::ContactUpdate,
     EventKind::GroupUpdate,
+    EventKind::IncomingCall,
 ];
 
 impl EventHandler for Relay {
@@ -78,6 +79,7 @@ impl EventHandler for Relay {
 pub(super) struct MediaSettings {
     pub dir: PathBuf,
     pub auto_download: bool,
+    pub auto_reject_call: bool,
 }
 
 pub(super) async fn run(
@@ -351,6 +353,9 @@ async fn handle(
                 tracing::warn!(device = %device.id(), %error, "failed to store contact");
             }
         }
+        Event::IncomingCall(call) => {
+            incoming_call(device, call, webhook, media).await;
+        }
         Event::GroupUpdate(update) => {
             group_update(device, update, webhook, media).await;
         }
@@ -367,6 +372,56 @@ async fn handle(
 }
 
 /// GOWA `addWebhookSessionID`: tag events with the slot that emitted them.
+/// Offer → optional auto-reject (`WHATSAPP_AUTO_REJECT_CALL`, 10 s) and the
+/// `call.offer` webhook (GOWA `handleCallOffer`). Other call actions are ignored.
+async fn incoming_call(
+    device: &Arc<DeviceInstance>,
+    call: &crate::wa::sdk::wacore::types::call::IncomingCall,
+    webhook: &Dispatcher,
+    media: &MediaSettings,
+) {
+    use crate::wa::sdk::wacore::types::call::CallAction;
+
+    let CallAction::Offer {
+        call_id,
+        call_creator,
+        group_jid,
+        ..
+    } = &call.action
+    else {
+        return;
+    };
+    let Some(client) = device.client() else {
+        return;
+    };
+    let mut auto_rejected = false;
+    if media.auto_reject_call {
+        let voip = client.voip();
+        let reject = voip.reject_call(call_id, &call.from, call_creator);
+        match tokio::time::timeout(std::time::Duration::from_secs(10), reject).await {
+            Ok(Ok(())) => auto_rejected = true,
+            Ok(Err(error)) => {
+                tracing::error!(device = %device.id(), %error, "failed to auto-reject call");
+            }
+            Err(_) => tracing::error!(device = %device.id(), "auto-reject call timed out"),
+        }
+    }
+    let resolver = ClientResolver::new(client, media.clone(), device);
+    let view = events::CallOfferView {
+        call_id: call_id.clone(),
+        from: call_creator.clone(),
+        auto_rejected,
+        platform: call.platform.clone().unwrap_or_default(),
+        version: call.version.clone().unwrap_or_default(),
+        group: group_jid.clone(),
+    };
+    let ts = call.timestamp.map_or_else(super::now, |t| t.as_secs());
+    let mut env =
+        events::call_offer_envelope(&resolver, &view, &device.jid().unwrap_or_default(), ts).await;
+    add_session_id(device, &mut env);
+    webhook.send(events::CALL_OFFER, env, &device.webhook());
+}
+
 /// `w:gp2` notifications → `group.participants` / `group.info` /
 /// `group.joined` webhooks (GOWA `handleGroupInfo`, `handleJoinedGroup`) and
 /// the stored chat name on a subject change.

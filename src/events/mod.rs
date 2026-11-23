@@ -444,6 +444,7 @@ fn other_types(msg: &proto::Message, p: &mut Map<String, Value>) {
 
 pub const CHAT_PRESENCE: &str = "chat_presence";
 pub const DEVICE_TEMPORARY_BAN: &str = "device.temporary_ban";
+pub const CALL_OFFER: &str = "call.offer";
 pub const GROUP_PARTICIPANTS: &str = "group.participants";
 pub const GROUP_INFO: &str = "group.info";
 pub const GROUP_JOINED: &str = "group.joined";
@@ -676,6 +677,49 @@ pub fn device_envelope(
         env.insert("device_id".into(), jid.into());
     }
     env
+}
+
+/// Incoming call (GOWA `createCallOfferPayload`).
+#[derive(Debug, Clone)]
+pub struct CallOfferView {
+    pub call_id: String,
+    pub from: Jid,
+    pub auto_rejected: bool,
+    pub platform: String,
+    pub version: String,
+    pub group: Option<Jid>,
+}
+
+pub async fn call_offer_envelope<R: Resolver>(
+    r: &R,
+    c: &CallOfferView,
+    device_id: &str,
+    ts: i64,
+) -> Map<String, Value> {
+    let mut p = Map::new();
+    p.insert("call_id".into(), c.call_id.clone().into());
+    if c.from.is_lid() {
+        p.insert("from_lid".into(), wa::jid::non_ad_string(&c.from).into());
+    }
+    p.insert(
+        "from".into(),
+        normalize(r, &c.from).await.to_string().into(),
+    );
+    p.insert(
+        "sender_display_name".into(),
+        r.display_name(&c.from, false, "").await.into(),
+    );
+    p.insert("auto_rejected".into(), c.auto_rejected.into());
+    if !c.platform.is_empty() {
+        p.insert("remote_platform".into(), c.platform.clone().into());
+    }
+    if !c.version.is_empty() {
+        p.insert("remote_version".into(), c.version.clone().into());
+    }
+    if let Some(group) = &c.group {
+        p.insert("group_jid".into(), wa::jid::non_ad_string(group).into());
+    }
+    group_envelope(CALL_OFFER, device_id, ts, Value::Object(p))
 }
 
 fn group_envelope(event: &str, device_id: &str, ts: i64, payload: Value) -> Map<String, Value> {

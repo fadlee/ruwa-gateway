@@ -56,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .unwrap_or_else(|| "statics".into());
 
     let scoped = routes::app::scoped()
+        .merge(routes::call::router())
         .merge(routes::chat::router())
         .merge(routes::group::router())
         .merge(routes::message::router())

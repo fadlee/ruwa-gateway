@@ -2,6 +2,7 @@
 //! message building). HTTP handlers stay thin and call into here.
 
 pub mod app;
+pub mod call;
 pub mod chat;
 pub mod device;
 pub mod group;

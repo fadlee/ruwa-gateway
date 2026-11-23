@@ -30,6 +30,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             os: cfg.os.clone(),
             media_dir: PathBuf::from("statics/media"),
             auto_download_media: cfg.auto_download_media,
+            auto_reject_call: cfg.auto_reject_call,
         },
         db,
         webhook,

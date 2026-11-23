@@ -49,6 +49,8 @@ pub struct DeviceOptions {
     pub media_dir: PathBuf,
     /// `WHATSAPP_AUTO_DOWNLOAD_MEDIA`.
     pub auto_download_media: bool,
+    /// `WHATSAPP_AUTO_REJECT_CALL`.
+    pub auto_reject_call: bool,
 }
 
 pub struct DeviceManager {
@@ -112,6 +114,7 @@ impl DeviceManager {
             processor::MediaSettings {
                 dir: manager.opts.media_dir.clone(),
                 auto_download: manager.opts.auto_download_media,
+                auto_reject_call: manager.opts.auto_reject_call,
             },
             manager.hub.clone(),
         ));

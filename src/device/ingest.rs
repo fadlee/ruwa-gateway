@@ -6,7 +6,7 @@
 
 use crate::{
     events::{IncomingMessage, Resolver},
-    storage::chat::{Chat, ChatStore, EditOutcome, Message, MessageEdit, Reaction},
+    storage::chat::{Chat, ChatStore, ContactName, EditOutcome, Message, MessageEdit, Reaction},
     wa::{Jid, Server, jid::parse_jid, message as msgx, proto},
 };
 
@@ -90,6 +90,21 @@ pub async fn store_incoming<R: Resolver>(
     let chat = chat_jid.to_string();
     let sender = sender_jid.to_string();
     let msg = &*m.message;
+
+    // whatsmeow keeps the sender's push name and verified business name in
+    // its contact store; GOWA reads them back for display names.
+    if !m.is_from_me && sender_jid.server != Server::Group {
+        if !m.push_name.is_empty() && m.push_name != "-" {
+            store
+                .set_contact_name(key, &sender, ContactName::Push(m.push_name.clone()))
+                .await?;
+        }
+        if let Some(name) = m.verified_name.as_deref().filter(|n| !n.is_empty()) {
+            store
+                .set_contact_name(key, &sender, ContactName::Business(name.to_owned()))
+                .await?;
+        }
+    }
 
     if let Some((reacted, emoji)) = msgx::reaction(msg) {
         let Some(id) = reacted.id.as_deref().filter(|id| !id.is_empty()) else {
@@ -354,6 +369,31 @@ pub async fn store_archive<R: Resolver>(
     Ok(())
 }
 
+/// App-state contact action (address book entry): whatsmeow stores its
+/// first/full name under the phone-number JID.
+pub async fn store_contact<R: Resolver>(
+    store: &ChatStore,
+    r: &R,
+    key: &str,
+    jid: &Jid,
+    action: &proto::sync_action_value::ContactAction,
+) -> anyhow::Result<()> {
+    let jid = match action.pn_jid.as_deref().and_then(|p| parse_jid(p).ok()) {
+        Some(pn) if jid.is_lid() => pn,
+        _ => normalize(r, jid).await,
+    };
+    store
+        .set_contact_name(
+            key,
+            &jid.to_non_ad().to_string(),
+            ContactName::Saved {
+                first: action.first_name.clone().unwrap_or_default(),
+                full: action.full_name.clone().unwrap_or_default(),
+            },
+        )
+        .await
+}
+
 /// GOWA `processHistorySync`: conversations (bootstrap/recent/on-demand)
 /// and push names.
 pub async fn store_history<R: Resolver>(
@@ -384,6 +424,9 @@ pub async fn store_history<R: Resolver>(
                 }
                 let Ok(jid) = parse_jid(id) else { continue };
                 let jid = normalize(r, &jid).await.to_string();
+                store
+                    .set_contact_name(key, &jid, ContactName::Push(name.to_owned()))
+                    .await?;
                 match store.get_chat(key, &jid).await? {
                     // Zero time keeps it from bubbling up in the chat list.
                     None => {

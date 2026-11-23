@@ -78,7 +78,25 @@ diesel::table! {
     }
 }
 
-diesel::allow_tables_to_appear_in_same_query!(chats, messages, message_reactions, message_edits);
+diesel::table! {
+    contacts (device_id, jid) {
+        device_id -> Text,
+        jid -> Text,
+        first_name -> Text,
+        full_name -> Text,
+        push_name -> Text,
+        business_name -> Text,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::allow_tables_to_appear_in_same_query!(
+    chats,
+    messages,
+    message_reactions,
+    message_edits,
+    contacts
+);
 
 /// Query cap GOWA applies to `limit`.
 pub const MAX_LIMIT: i64 = 1000;
@@ -161,6 +179,31 @@ pub struct MessageEdit {
     pub new_content: String,
     pub edited_at: i64,
     pub created_at: i64,
+}
+
+/// whatsmeow `ContactInfo` (minus `Found`: a stored row is found).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Queryable, Selectable)]
+#[diesel(table_name = contacts)]
+pub struct Contact {
+    pub device_id: String,
+    pub jid: String,
+    pub first_name: String,
+    pub full_name: String,
+    pub push_name: String,
+    pub business_name: String,
+    pub updated_at: i64,
+}
+
+/// Which name a contact update sets.
+#[derive(Debug, Clone)]
+pub enum ContactName {
+    /// App-state contact action (address book entry).
+    Saved {
+        first: String,
+        full: String,
+    },
+    Push(String),
+    Business(String),
 }
 
 /// GOWA `ChatFilter`.
@@ -786,6 +829,94 @@ impl ChatStore {
             .await
     }
 
+    // ---- contacts ----
+
+    /// Upsert one name of a contact, leaving the others.
+    pub async fn set_contact_name(
+        &self,
+        device: &str,
+        jid: &str,
+        name: ContactName,
+    ) -> anyhow::Result<()> {
+        let (device, jid) = (device.to_owned(), jid.to_owned());
+        let now = crate::device::now();
+        self.db
+            .run(move |c| {
+                let (first, full, push, business) = match &name {
+                    ContactName::Saved { first, full } => (Some(first), Some(full), None, None),
+                    ContactName::Push(p) => (None, None, Some(p), None),
+                    ContactName::Business(b) => (None, None, None, Some(b)),
+                };
+                diesel::sql_query(
+                    "INSERT INTO contacts (device_id, jid, first_name, full_name, push_name, business_name, updated_at)
+                     VALUES (?, ?, COALESCE(?, ''), COALESCE(?, ''), COALESCE(?, ''), COALESCE(?, ''), ?)
+                     ON CONFLICT (device_id, jid) DO UPDATE SET
+                        first_name = COALESCE(?, first_name),
+                        full_name = COALESCE(?, full_name),
+                        push_name = COALESCE(?, push_name),
+                        business_name = COALESCE(?, business_name),
+                        updated_at = excluded.updated_at",
+                )
+                .bind::<Text, _>(&device)
+                .bind::<Text, _>(&jid)
+                .bind::<Nullable<Text>, _>(first)
+                .bind::<Nullable<Text>, _>(full)
+                .bind::<Nullable<Text>, _>(push)
+                .bind::<Nullable<Text>, _>(business)
+                .bind::<BigInt, _>(now)
+                .bind::<Nullable<Text>, _>(first)
+                .bind::<Nullable<Text>, _>(full)
+                .bind::<Nullable<Text>, _>(push)
+                .bind::<Nullable<Text>, _>(business)
+                .execute(c)
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Contacts among `jids`, keyed by JID.
+    pub async fn contacts(
+        &self,
+        device: &str,
+        jids: Vec<String>,
+    ) -> anyhow::Result<std::collections::HashMap<String, Contact>> {
+        let device = device.to_owned();
+        self.db
+            .run(move |c| {
+                let mut out = std::collections::HashMap::new();
+                for batch in jids.chunks(500) {
+                    let rows: Vec<Contact> = contacts::table
+                        .filter(contacts::device_id.eq(&device))
+                        .filter(contacts::jid.eq_any(batch))
+                        .select(Contact::as_select())
+                        .load(c)?;
+                    out.extend(rows.into_iter().map(|r| (r.jid.clone(), r)));
+                }
+                Ok(out)
+            })
+            .await
+    }
+
+    /// Oldest stored message of a chat (GOWA `GetOldestMessageByDevice`).
+    pub async fn oldest_message(
+        &self,
+        device: &str,
+        chat: &str,
+    ) -> anyhow::Result<Option<Message>> {
+        let (device, chat) = (device.to_owned(), chat.to_owned());
+        self.db
+            .run(move |c| {
+                messages::table
+                    .filter(messages::chat_jid.eq(chat))
+                    .filter(messages::device_id.eq(device))
+                    .order((messages::timestamp.asc(), messages::id.asc()))
+                    .select(Message::as_select())
+                    .first(c)
+                    .optional()
+            })
+            .await
+    }
+
     // ---- maintenance ----
 
     /// Drop everything stored under a partition key (GOWA `DeleteDeviceData`).
@@ -804,6 +935,8 @@ impl ChatStore {
                     )
                     .execute(c)?;
                     diesel::delete(messages::table.filter(messages::device_id.eq(&device)))
+                        .execute(c)?;
+                    diesel::delete(contacts::table.filter(contacts::device_id.eq(&device)))
                         .execute(c)?;
                     diesel::delete(chats::table.filter(chats::device_id.eq(&device))).execute(c)
                 })
@@ -1070,6 +1203,44 @@ mod tests {
             EditOutcome::Applied
         );
         assert!(s.get_message(DEV, "9").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn contact_names_merge() {
+        let s = store();
+        let j = "628222@s.whatsapp.net";
+        s.set_contact_name(DEV, j, ContactName::Push("Bobby".into()))
+            .await
+            .unwrap();
+        s.set_contact_name(
+            DEV,
+            j,
+            ContactName::Saved {
+                first: "Bob".into(),
+                full: "Bob Smith".into(),
+            },
+        )
+        .await
+        .unwrap();
+        s.set_contact_name(DEV, j, ContactName::Business("Bob Co".into()))
+            .await
+            .unwrap();
+        let got = s.contacts(DEV, vec![j.into(), "x".into()]).await.unwrap();
+        assert_eq!(got.len(), 1);
+        let c = &got[j];
+        assert_eq!(
+            (
+                c.full_name.as_str(),
+                c.push_name.as_str(),
+                c.business_name.as_str()
+            ),
+            ("Bob Smith", "Bobby", "Bob Co")
+        );
+        s.store_messages(vec![msg("b", 200, "b"), msg("a", 100, "a")])
+            .await
+            .unwrap();
+        assert_eq!(s.oldest_message(DEV, CHAT).await.unwrap().unwrap().id, "a");
+        assert!(s.oldest_message(DEV, "none").await.unwrap().is_none());
     }
 
     #[tokio::test]

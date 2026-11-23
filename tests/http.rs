@@ -26,6 +26,7 @@ use tower::ServiceExt;
 
 struct Harness {
     app: Router,
+    db: Db,
     _dir: TempDir,
 }
 
@@ -49,7 +50,7 @@ async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Har
             media_dir: dir.path().join("statics/media"),
             auto_download_media: true,
         },
-        db,
+        db.clone(),
         Dispatcher::new(WebhookConfig::default()).unwrap(),
     )
     .await
@@ -74,6 +75,7 @@ async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Har
     };
     Harness {
         app: router(state),
+        db,
         _dir: dir,
     }
 }
@@ -683,4 +685,270 @@ mod websocket {
         .await;
         assert_eq!(status, StatusCode::UPGRADE_REQUIRED);
     }
+}
+
+// ---- /chats, /chat/{jid}/* ----
+
+async fn seed_chats(h: &Harness) {
+    use ruwa_gateway::storage::chat::{Chat, ChatStore, ContactName, Message, Reaction};
+    let s = ChatStore::new(h.db.clone());
+    // Unpaired slot `default` → partition "default".
+    let dev = "default";
+    let chat = |jid: &str, name: &str, last: i64, archived: bool| Chat {
+        jid: jid.into(),
+        device_id: dev.into(),
+        name: name.into(),
+        last_message_time: last,
+        ephemeral_expiration: if archived { 86400 } else { 0 },
+        archived,
+        ..Default::default()
+    };
+    s.store_chat(chat(
+        "628222@s.whatsapp.net",
+        "628222",
+        1_700_000_200,
+        false,
+    ))
+    .await
+    .unwrap();
+    s.store_chat(chat("1203@g.us", "", 1_700_000_100, true))
+        .await
+        .unwrap();
+    s.store_chat(chat("628333@s.whatsapp.net", "Carol", 0, false))
+        .await
+        .unwrap();
+    s.set_contact_name(
+        dev,
+        "628222@s.whatsapp.net",
+        ContactName::Saved {
+            first: "Bob".into(),
+            full: "Bob Smith".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let msg = |id: &str, ts: i64, from_me: bool, content: &str| Message {
+        id: id.into(),
+        chat_jid: "628222@s.whatsapp.net".into(),
+        device_id: dev.into(),
+        sender: if from_me {
+            "628111@s.whatsapp.net".into()
+        } else {
+            "628222@s.whatsapp.net".into()
+        },
+        content: content.into(),
+        timestamp: ts,
+        is_from_me: from_me,
+        ..Default::default()
+    };
+    let mut reply = msg("M2", 1_700_000_200, true, "reply");
+    reply.context_metadata = r#"{"replied_to_id":"M1"}"#.into();
+    let mut image = msg("M3", 1_700_000_150, false, "");
+    image.media_type = "image".into();
+    image.filename = "image_x.jpg".into();
+    image.file_length = 10;
+    s.store_messages(vec![msg("M1", 1_700_000_000, false, "hello"), reply, image])
+        .await
+        .unwrap();
+    s.store_reaction(Reaction {
+        message_id: "M1".into(),
+        chat_jid: "628222@s.whatsapp.net".into(),
+        device_id: dev.into(),
+        reactor_jid: "628222@s.whatsapp.net".into(),
+        emoji: "👍".into(),
+        reaction_timestamp: 1_700_000_050,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn chats_list_contract() {
+    let h = harness().await;
+    seed_chats(&h).await;
+    let (status, body) = call(&h.app, get("/chats")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["code"], "SUCCESS");
+    assert_eq!(body["message"], "Success get chat list");
+    let r = &body["results"];
+    assert_eq!(
+        r["pagination"],
+        serde_json::json!({"limit": 25, "offset": 0, "total": 3})
+    );
+    let data = r["data"].as_array().unwrap();
+    assert_eq!(data.len(), 3);
+    // Newest first; JID-like stored name replaced by the saved contact name.
+    assert_eq!(data[0]["jid"], "628222@s.whatsapp.net");
+    assert_eq!(data[0]["name"], "Bob Smith");
+    assert_eq!(data[0]["last_message_time"], "2023-11-14T22:16:40Z");
+    assert_eq!(data[1]["name"], "Group 1203");
+    assert_eq!(data[1]["archived"], true);
+    assert_eq!(data[1]["ephemeral_expiration"], 86400);
+    assert_eq!(data[2]["last_message_time"], "0001-01-01T00:00:00Z");
+    let keys: Vec<_> = data[0].as_object().unwrap().keys().cloned().collect();
+    assert_eq!(
+        keys,
+        [
+            "archived",
+            "created_at",
+            "ephemeral_expiration",
+            "jid",
+            "last_message_time",
+            "name",
+            "updated_at"
+        ]
+    );
+
+    let (_, body) = call(&h.app, get("/chats?archived=true&limit=abc")).await;
+    assert_eq!(body["results"]["pagination"]["total"], 1);
+    assert_eq!(body["results"]["pagination"]["limit"], 25);
+    let (_, body) = call(&h.app, get("/chats?search=Car&offset=0")).await;
+    assert_eq!(body["results"]["data"][0]["name"], "Carol");
+    let (_, body) = call(&h.app, get("/chats?has_media=true")).await;
+    assert_eq!(body["results"]["pagination"]["total"], 1);
+
+    let (status, body) = call(&h.app, get("/chats?limit=101&offset=-1")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "VALIDATION_ERROR");
+    assert_eq!(
+        body["message"],
+        "limit: must be no greater than 100; offset: must be no less than 0."
+    );
+}
+
+#[tokio::test]
+async fn chat_messages_contract() {
+    let h = harness().await;
+    seed_chats(&h).await;
+    let (status, body) = call(&h.app, get("/chat/628222%40s.whatsapp.net/messages")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["message"], "Success get chat messages");
+    let r = &body["results"];
+    assert_eq!(
+        r["pagination"],
+        serde_json::json!({"limit": 50, "offset": 0, "total": 3})
+    );
+    assert_eq!(r["chat_info"]["name"], "Bob Smith");
+    let data = r["data"].as_array().unwrap();
+    assert_eq!(
+        data.iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["M2", "M3", "M1"]
+    );
+    assert_eq!(data[0]["context_metadata"], r#"{"replied_to_id":"M1"}"#);
+    assert_eq!(data[0]["sender_display_name"], "628111");
+    assert!(data[0].get("reactions").is_none());
+    assert!(data[0].get("call_metadata").is_none());
+    assert_eq!(data[1]["media_type"], "image");
+    assert_eq!(data[1]["file_length"], 10);
+    assert_eq!(data[2]["sender_display_name"], "Bob Smith");
+    assert_eq!(data[2]["timestamp"], "2023-11-14T22:13:20Z");
+    assert_eq!(
+        data[2]["reactions"],
+        serde_json::json!([{
+            "emoji": "👍",
+            "sender_jid": "628222@s.whatsapp.net",
+            "sender_display_name": "Bob Smith",
+            "is_from_me": false,
+            "timestamp": "2023-11-14T22:14:10Z"
+        }])
+    );
+
+    // Filters; total still counts the whole chat.
+    let (_, body) = call(
+        &h.app,
+        get("/chat/628222@s.whatsapp.net/messages?is_from_me=false&media_only=true"),
+    )
+    .await;
+    assert_eq!(body["results"]["data"].as_array().unwrap().len(), 1);
+    assert_eq!(body["results"]["pagination"]["total"], 3);
+    let (_, body) = call(
+        &h.app,
+        get(
+            "/chat/628222@s.whatsapp.net/messages?start_time=2023-11-14T22:14:00Z&limit=1&offset=1",
+        ),
+    )
+    .await;
+    assert_eq!(body["results"]["data"][0]["id"], "M3");
+    let (_, body) = call(
+        &h.app,
+        get("/chat/628222@s.whatsapp.net/messages?search=HELL"),
+    )
+    .await;
+    assert_eq!(body["results"]["data"][0]["id"], "M1");
+
+    // Unknown chat: empty, not an error.
+    let (status, body) = call(&h.app, get("/chat/628999@s.whatsapp.net/messages")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["results"]["data"], serde_json::json!([]));
+    assert_eq!(body["results"]["chat_info"]["name"], "628999");
+    assert_eq!(body["results"]["chat_info"]["last_message_time"], "");
+
+    let (status, body) = call(
+        &h.app,
+        get("/chat/628222@s.whatsapp.net/messages?start_time=yesterday"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("invalid start_time format")
+    );
+}
+
+#[tokio::test]
+async fn chat_actions_validate_then_need_login() {
+    let h = harness().await;
+    seed_chats(&h).await;
+    let jid = "628222@s.whatsapp.net";
+    for path in ["pin", "archive", "disappearing"] {
+        // Empty body or bad JSON → 400 BAD_REQUEST.
+        let (status, body) = call(&h.app, post_json(&format!("/chat/{jid}/{path}"), "")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(body["code"], "BAD_REQUEST");
+        assert_eq!(body["message"], "Invalid request body");
+        let (status, _) = call(&h.app, post_json(&format!("/chat/{jid}/{path}"), "{")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, body) = call(
+        &h.app,
+        post_json(
+            &format!("/chat/{jid}/disappearing"),
+            r#"{"timer_seconds":5}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["message"],
+        "timer_seconds: timer_seconds must be one of: 0 (off), 86400 (24h), 604800 (7d), 7776000 (90d)."
+    );
+    let (status, body) = call(
+        &h.app,
+        post_json(&format!("/chat/{jid}/pin"), r#"{"pinned":true}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "AUTHENTICATION_ERROR");
+
+    // History: count range, then an anchor, then login.
+    let (status, body) = call(
+        &h.app,
+        post_json(&format!("/chat/{jid}/history"), r#"{"count":501}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["message"], "count: must be no greater than 500.");
+    let (status, body) = call(&h.app, post_json("/chat/628999@s.whatsapp.net/history", "")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["message"],
+        "chat has no stored messages yet; nothing to anchor the history sync request on"
+    );
+    let (status, _) = call(&h.app, post_json(&format!("/chat/{jid}/history"), "")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

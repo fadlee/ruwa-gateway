@@ -15,6 +15,8 @@ use super::{
 };
 use crate::{
     events::{self, IncomingMessage, MediaRef, ReceiptView, Resolver},
+    storage::chat::ChatStore,
+    usecase::names,
     wa::{
         Jid,
         sdk::prelude::{Client, Event, EventHandler, EventInterest, EventKind, InboundMessage},
@@ -56,6 +58,7 @@ const KINDS: &[EventKind] = &[
     EventKind::StreamReplaced,
     EventKind::HistorySync,
     EventKind::ArchiveUpdate,
+    EventKind::ContactUpdate,
 ];
 
 impl EventHandler for Relay {
@@ -173,7 +176,7 @@ async fn handle(
             let Some(client) = device.client() else {
                 return;
             };
-            let resolver = ClientResolver::new(client.clone(), media.clone());
+            let resolver = ClientResolver::new(client.clone(), media.clone(), device);
             let own = own_jid(&client);
             for inbound in batch.messages.iter() {
                 let m = incoming(inbound);
@@ -210,7 +213,7 @@ async fn handle(
             let Some(client) = device.client() else {
                 return;
             };
-            let resolver = ClientResolver::new(client, media.clone());
+            let resolver = ClientResolver::new(client, media.clone(), device);
             let mut env =
                 events::receipt_envelope(&resolver, &view, &device.jid().unwrap_or_default()).await;
             add_session_id(device, &mut env);
@@ -226,7 +229,7 @@ async fn handle(
             let Some(client) = device.client() else {
                 return;
             };
-            let resolver = ClientResolver::new(client, media.clone());
+            let resolver = ClientResolver::new(client, media.clone(), device);
             let view = events::ChatPresenceView {
                 chat: cp.source.chat.clone(),
                 sender: cp.source.sender.clone(),
@@ -292,7 +295,7 @@ async fn handle(
                 conversations = data.conversations.len(),
                 "storing history sync"
             );
-            let resolver = ClientResolver::new(client.clone(), media.clone());
+            let resolver = ClientResolver::new(client.clone(), media.clone(), device);
             if let Err(error) = ingest::store_history(
                 device.chats(),
                 &resolver,
@@ -309,7 +312,7 @@ async fn handle(
             let (Some(client), Some(archived)) = (device.client(), update.action.archived) else {
                 return;
             };
-            let resolver = ClientResolver::new(client, media.clone());
+            let resolver = ClientResolver::new(client, media.clone(), device);
             if let Err(error) = ingest::store_archive(
                 device.chats(),
                 &resolver,
@@ -320,6 +323,23 @@ async fn handle(
             .await
             {
                 tracing::warn!(device = %device.id(), %error, "failed to update archive state");
+            }
+        }
+        Event::ContactUpdate(update) => {
+            let Some(client) = device.client() else {
+                return;
+            };
+            let resolver = ClientResolver::new(client, media.clone(), device);
+            if let Err(error) = ingest::store_contact(
+                device.chats(),
+                &resolver,
+                &device.storage_partition(),
+                &update.jid,
+                &update.action,
+            )
+            .await
+            {
+                tracing::warn!(device = %device.id(), %error, "failed to store contact");
             }
         }
         Event::StreamReplaced(_) => {
@@ -371,11 +391,18 @@ fn own_jid(client: &Client) -> Option<Jid> {
 pub struct ClientResolver {
     client: Arc<Client>,
     media: MediaSettings,
+    chats: ChatStore,
+    partition: String,
 }
 
 impl ClientResolver {
-    pub(super) fn new(client: Arc<Client>, media: MediaSettings) -> Self {
-        Self { client, media }
+    pub(super) fn new(client: Arc<Client>, media: MediaSettings, device: &DeviceInstance) -> Self {
+        Self {
+            client,
+            media,
+            chats: device.chats().clone(),
+            partition: device.storage_partition(),
+        }
     }
 }
 
@@ -390,25 +417,36 @@ impl Resolver for ClientResolver {
         Some(Jid::pn(&*entry.phone_number))
     }
 
-    /// Best effort until contacts are stored (Fase 3): for others the live
-    /// push name, else the phone user part; for the account its push name.
+    /// GOWA `addSenderDisplayName`: contact store, live push name, user part;
+    /// the account's own push name for its messages.
     async fn display_name(&self, sender: &Jid, is_from_me: bool, push_name: &str) -> String {
-        if is_from_me {
-            let own = self.client.push_name();
-            if !own.is_empty() {
-                return own;
-            }
-        } else if !push_name.is_empty() {
-            return push_name.to_owned();
-        }
-        let jid = if sender.is_lid() {
+        let normalized = if sender.is_lid() {
             self.pn_for_lid(sender)
                 .await
                 .unwrap_or_else(|| sender.clone())
         } else {
             sender.clone()
+        }
+        .to_non_ad();
+        let key = normalized.to_string();
+        let contact = self
+            .chats
+            .contacts(&self.partition, vec![key.clone()])
+            .await
+            .ok()
+            .and_then(|mut m| m.remove(&key));
+        let account = names::Account {
+            jid: own_jid(&self.client),
+            name: self.client.push_name(),
         };
-        jid.user.to_string()
+        names::sender_display_name(
+            &key,
+            Some(&normalized),
+            is_from_me,
+            &account,
+            push_name,
+            contact.as_ref(),
+        )
     }
 
     fn auto_download(&self) -> bool {

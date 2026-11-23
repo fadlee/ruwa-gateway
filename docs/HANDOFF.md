@@ -6,15 +6,16 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 3 — chat storage selesai (kode + test); berikutnya endpoint `/chats`, `/chat/{jid}/*`.
-- **Build**: `cargo test` (108 test: 82 unit + 26 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Fase aktif**: Fase 3 — chat storage + `/chats`, `/chat/{jid}/*` selesai; berikutnya `/message/{id}/*`.
+- **Build**: `cargo test` (116 test: 87 unit + 29 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
   gowa-ui terunduh & dirender, indikator `/ws` hijau di headless Chrome.
 - **Belum terverifikasi live**: kirim media (upload ke CDN WhatsApp), webhook pesan masuk/media/receipt/presence,
   auto-download, `/user/*`, logout dari HP (`device.logged_out`), temp ban, **chat storage** (history sync setelah
-  pair, pesan masuk/keluar tersimpan, reply setelah restart). Cek via `sqlite3 storages/ruwa.db 'select * from chats'`.
+  pair, pesan masuk/keluar tersimpan, reply setelah restart), `/chat/{jid}/pin|archive|disappearing|history`
+  (app-state/protocol ke WhatsApp), nama dari `ContactUpdate`. Cek via gowa-ui menu Chats atau `GET /chats`.
 - **whatsapp-rust rev**: `94877bedb6cd473864f9f6b332a5c13d5fbef789`
 - **GOWA acuan**: `3744c92a24fa0806c68df9bf6a34db4340016e10` (snapshot di `docs/upstream/`)
 
@@ -41,10 +42,9 @@
    Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
    `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
    `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
-2. Fase 3 lanjutan: `/chats` + `/chat/{jid}/messages|history|pin|disappearing|archive` di atas `storage::chat`
-   (query/filter/count sudah ada: `list_chats`, `count_chats`, `list_messages`, `search_messages`), lalu
-   `/message/{id}/*`, `/group/*`, sisa `/user/*`, sticker/poll/presence, event grup/label/call.
-   Cek format response GOWA `/chats` (timestamp RFC3339, field `reactions`) di `docs/upstream/openapi.yaml`.
+2. Fase 3 lanjutan: `/message/{id}/revoke|delete|reaction|update|read|played|star|unstar|forward|download`
+   (GOWA `usecase/message.go`; storage sudah punya `get_message_in_chat`, `delete_message`, `apply_edit`), lalu
+   `/group/*`, sisa `/user/*`, sticker/poll/presence, event grup/label/call.
 
 ## Keputusan yang sudah diambil
 
@@ -73,6 +73,10 @@
 | 2026-11-23 | Cache `device/recent.rs` dihapus; reply mengutip dari chat storage | GOWA `mergeReplyContext` |
 | 2026-11-23 | `/send/message` tanpa `duration` mengirim `expiration` = timer chat tersimpan (atau 0) | GOWA `getDefaultEphemeralExpiration` (selalu set field) |
 | 2026-11-23 | Tabel chatwoot/poll/scheduled belum dibuat | dibuat saat fiturnya (poll Fase 3, schedule Fase 4; chatwoot di luar scope) |
+| 2026-11-23 | Tabel `contacts` sendiri (migrasi `000003`) sebagai pengganti contact store whatsmeow | whatsapp-rust tidak menyimpan kontak, hanya event `ContactUpdate`; GOWA memakai contact store untuk nama chat & sender |
+| 2026-11-23 | Kebijakan nama di `usecase/names.rs` (fungsi murni) dipakai `/chats`, `/chat/*/messages`, dan `sender_display_name` webhook | satu sumber, port `ChatDisplayNameResolver` + `SenderDisplayNameResolver` |
+| 2026-11-23 | Endpoint `/chat/*`: body gagal bind → 400 `BAD_REQUEST` `Invalid request body`; query tak valid → default | perilaku handler GOWA `ui/rest/chat.go` + Fiber `Query[T]` (beda dengan `/send/*`) |
+| 2026-11-23 | Timestamp response chat = RFC3339 UTC; unix 0 → `0001-01-01T00:00:00Z` | GOWA `formatTimestamp` (zero time); `APP_TIMEZONE` belum didukung |
 
 ## Catatan / jebakan
 
@@ -82,9 +86,12 @@
 - Server menulis ke `storages/` dan `statics/` **relatif terhadap cwd**. Untuk eksperimen jalankan dari
   direktori lain (di-gitignore, tapi tetap rapi).
 - Perbedaan perilaku dari GOWA yang disadari (belum ditutup):
-  - `sender_display_name` sementara = push name / user part JID (GOWA pakai contact store whatsmeow dulu) — belum
-    ditutup oleh chat storage; perlu contact store whatsapp-rust.
-  - Nama chat 1:1 dari history sync memakai `displayName` percakapan; GOWA lebih dulu tanya contact store.
+  - Tabel `contacts` hanya terisi dari `ContactUpdate` (app state), push name pesan/history, dan verified name —
+    whatsmeow juga mengisi dari sumber lain (mis. `contacts` history sync, usync). Nama bisa lebih jarang terisi.
+  - Nama chat 1:1 dari history sync memakai `displayName` percakapan saat ingest; GOWA lebih dulu tanya contact store
+    (di read path, `/chats` tetap memakai contact store bila nama tersimpan berupa nomor/JID).
+  - `APP_TIMEZONE` (GOWA `AppLocation`) belum ada; timestamp selalu UTC.
+  - Pesan error parse `start_time`/`end_time` meniru format Go tetapi detail error-nya dari chrono.
   - Teks chat storage belum meringkas pesan bisnis (template/interactive/list/buttons/product/order) — GOWA ya.
   - Panggilan masuk belum disimpan sebagai baris `media_type = call` (`CreateIncomingCallRecord`) → bersama `call.offer`.
   - History sync tidak ditulis ke file JSON `storages/history-*.json` seperti GOWA (hanya ke DB).
@@ -111,6 +118,16 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-23 — Fase 3: `/chats`, `/chat/{jid}/*`
+- `usecase/chat.rs` + `http/routes/chat.rs`: list chats (filter search/has_media/archived, pagination total terfilter),
+  messages (filter waktu RFC3339, media_only, is_from_me, search; total = semua pesan chat; chat belum tersimpan → kosong),
+  pin/unpin & archive (app-state `chat_actions`), disappearing (1:1 protocol message, grup `set_ephemeral`),
+  history on-demand (`fetch_message_history` dari pesan tertua). Validasi ozzo + body/query ala Fiber.
+- `storage/chat.rs`: tabel `contacts` (+ `oldest_message`), ingest mengisi dari push name, verified name,
+  `ContactUpdate`, push name history sync. `usecase/names.rs`: resolver nama chat/sender; webhook
+  `sender_display_name` kini memakai kontak tersimpan (gap lama ditutup).
+- Contract test: `chats_list_contract`, `chat_messages_contract`, `chat_actions_validate_then_need_login`.
 
 ### 2026-11-23 — Fase 3: chat storage
 - `storage/chat.rs`: tabel `chats`, `messages`, `message_reactions`, `message_edits` (migrasi `000002`), upsert ala GOWA

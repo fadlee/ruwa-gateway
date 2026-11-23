@@ -729,3 +729,60 @@ async fn message_deleted_event() {
     assert_eq!(env["payload"]["original_filename"], "a.jpg");
     assert_eq!(env["payload"]["chat_lid"], "251556368777322@lid");
 }
+
+#[tokio::test]
+async fn label_events() {
+    let device = "628123456789@s.whatsapp.net";
+    let edit = label_edit_envelope(
+        &LabelEditView {
+            label_id: "9".into(),
+            name: Some("Important".into()),
+            color: Some(2),
+            predefined_id: Some(1),
+            deleted: Some(false),
+            order_index: Some(1),
+            is_active: Some(true),
+            kind: Some("CUSTOM".into()),
+            is_immutable: Some(false),
+            mute_end_time_ms: Some(0),
+        },
+        device,
+        secs("2026-01-22T12:03:00Z"),
+    );
+    let mut expected = doc_example("Label Edit");
+    // GOWA emits `predefinedId` (int32) as a JSON number; the doc shows a string.
+    expected["payload"]["predefined_id"] = json!(1);
+    assert_matches_doc(&Value::Object(edit), &expected);
+
+    // Absent fields are omitted.
+    let sparse = label_edit_envelope(
+        &LabelEditView {
+            label_id: "9".into(),
+            deleted: Some(true),
+            ..Default::default()
+        },
+        device,
+        0,
+    );
+    assert_eq!(sparse["payload"], json!({"label_id": "9", "deleted": true}));
+
+    let r = FakeResolver::new(&[("251556368777322", "628987654321")]);
+    let assoc = label_association_envelope(
+        &r,
+        "9",
+        true,
+        &jid("120363402106@g.us"),
+        device,
+        secs("2026-01-22T12:04:00Z"),
+    )
+    .await;
+    let mut expected = doc_example("Label Association");
+    expected["payload"]["chat_id"] = json!("120363402106@g.us");
+    assert_matches_doc(&Value::Object(assoc), &expected);
+
+    let lid =
+        label_association_envelope(&r, "9", false, &jid("251556368777322@lid"), device, 0).await;
+    assert_eq!(lid["payload"]["chat_lid"], "251556368777322@lid");
+    assert_eq!(lid["payload"]["chat_id"], "628987654321@s.whatsapp.net");
+    assert_eq!(lid["payload"]["labeled"], false);
+}

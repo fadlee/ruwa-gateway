@@ -444,6 +444,8 @@ fn other_types(msg: &proto::Message, p: &mut Map<String, Value>) {
 
 pub const CHAT_PRESENCE: &str = "chat_presence";
 pub const DEVICE_TEMPORARY_BAN: &str = "device.temporary_ban";
+pub const LABEL_EDIT: &str = "label.edit";
+pub const LABEL_ASSOCIATION: &str = "label.association";
 pub const MESSAGE_DELETED: &str = "message.deleted";
 pub const PRESENCE: &str = "presence";
 pub const CALL_OFFER: &str = "call.offer";
@@ -679,6 +681,67 @@ pub fn device_envelope(
         env.insert("device_id".into(), jid.into());
     }
     env
+}
+
+/// Fields of a label edit; only those WhatsApp sent are emitted.
+#[derive(Debug, Clone, Default)]
+pub struct LabelEditView {
+    pub label_id: String,
+    pub name: Option<String>,
+    pub color: Option<i32>,
+    pub predefined_id: Option<i32>,
+    pub deleted: Option<bool>,
+    pub order_index: Option<i32>,
+    pub is_active: Option<bool>,
+    /// Proto enum name, e.g. `CUSTOM`.
+    pub kind: Option<String>,
+    pub is_immutable: Option<bool>,
+    pub mute_end_time_ms: Option<i64>,
+}
+
+/// `label.edit` (GOWA `buildLabelAppStatePayload`).
+pub fn label_edit_envelope(v: &LabelEditView, device_id: &str, ts: i64) -> Map<String, Value> {
+    let mut p = Map::new();
+    p.insert("label_id".into(), v.label_id.clone().into());
+    let mut put = |k: &str, val: Option<Value>| {
+        if let Some(val) = val {
+            p.insert(k.into(), val);
+        }
+    };
+    put("name", v.name.clone().map(Into::into));
+    put("color", v.color.map(Into::into));
+    put("predefined_id", v.predefined_id.map(Into::into));
+    put("deleted", v.deleted.map(Into::into));
+    put("order_index", v.order_index.map(Into::into));
+    put("is_active", v.is_active.map(Into::into));
+    put("type", v.kind.clone().map(Into::into));
+    put("is_immutable", v.is_immutable.map(Into::into));
+    put("mute_end_time_ms", v.mute_end_time_ms.map(Into::into));
+    group_envelope(LABEL_EDIT, device_id, ts, Value::Object(p))
+}
+
+/// `label.association` for a chat; the chat LID is kept in `chat_lid` and
+/// `chat_id` is normalised to the phone number when known.
+pub async fn label_association_envelope<R: Resolver>(
+    r: &R,
+    label_id: &str,
+    labeled: bool,
+    chat: &Jid,
+    device_id: &str,
+    ts: i64,
+) -> Map<String, Value> {
+    let mut p = Map::new();
+    p.insert("label_id".into(), label_id.into());
+    p.insert("labeled".into(), labeled.into());
+    let chat = chat.to_non_ad();
+    if chat.is_lid() {
+        p.insert("chat_lid".into(), chat.to_string().into());
+    }
+    p.insert(
+        "chat_id".into(),
+        normalize(r, &chat).await.to_string().into(),
+    );
+    group_envelope(LABEL_ASSOCIATION, device_id, ts, Value::Object(p))
 }
 
 /// A message deleted "for me", with the stored copy that was removed.

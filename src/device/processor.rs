@@ -63,6 +63,8 @@ const KINDS: &[EventKind] = &[
     EventKind::IncomingCall,
     EventKind::Presence,
     EventKind::DeleteMessageForMeUpdate,
+    EventKind::LabelEditUpdate,
+    EventKind::LabelAssociationUpdate,
 ];
 
 impl EventHandler for Relay {
@@ -417,6 +419,48 @@ async fn handle(
                 events::message_deleted_envelope(&resolver, &view, &own, super::now()).await;
             add_session_id(device, &mut env);
             webhook.send(events::MESSAGE_DELETED, env, &device.webhook());
+        }
+        Event::LabelEditUpdate(update) => {
+            use crate::wa::sdk::waproto::buffa::Enumeration;
+            let a = &update.action;
+            let view = events::LabelEditView {
+                label_id: update.label_id.clone(),
+                name: a.name.clone(),
+                color: a.color,
+                predefined_id: a.predefined_id,
+                deleted: a.deleted,
+                order_index: a.order_index,
+                is_active: a.is_active,
+                kind: a.r#type.map(|t| t.proto_name().to_owned()),
+                is_immutable: a.is_immutable,
+                mute_end_time_ms: a.mute_end_time_ms,
+            };
+            let ts = update
+                .action_timestamp
+                .map_or_else(super::now, |t| t.as_secs());
+            let mut env = events::label_edit_envelope(&view, &device.jid().unwrap_or_default(), ts);
+            add_session_id(device, &mut env);
+            webhook.send(events::LABEL_EDIT, env, &device.webhook());
+        }
+        Event::LabelAssociationUpdate(update) => {
+            let Some(client) = device.client() else {
+                return;
+            };
+            let resolver = ClientResolver::new(client, media.clone(), device);
+            let ts = update
+                .action_timestamp
+                .map_or_else(super::now, |t| t.as_secs());
+            let mut env = events::label_association_envelope(
+                &resolver,
+                &update.label_id,
+                update.action.labeled.unwrap_or_default(),
+                &update.chat_jid,
+                &device.jid().unwrap_or_default(),
+                ts,
+            )
+            .await;
+            add_session_id(device, &mut env);
+            webhook.send(events::LABEL_ASSOCIATION, env, &device.webhook());
         }
         Event::Presence(update) => {
             use crate::wa::sdk::wacore::types::presence::PresenceStatus;

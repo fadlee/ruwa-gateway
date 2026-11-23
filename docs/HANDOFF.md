@@ -6,8 +6,8 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence|poll` selesai; `/user/*`, `/call/reject`, `call.offer` + auto-reject selesai; auto reply + auto mark read selesai; event `presence` + presence on-connect/pulse selesai; `message.deleted` selesai; berikutnya event label.
-- **Build**: `cargo test` (172 test: 128 unit + 44 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence|poll` selesai; `/user/*`, `/call/reject`, `call.offer` + auto-reject selesai; auto reply + auto mark read selesai; event `presence` + presence on-connect/pulse selesai; event label selesai; sisa `device.reachout_timelock` (+ error 463 → `WA_REACHOUT_TIMELOCK`), lalu verifikasi live dan Fase 4.
+- **Build**: `cargo test` (173 test: 129 unit + 44 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -44,7 +44,7 @@
    Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
    `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
    `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
-2. Fase 3 lanjutan: event label (`label.edit`, `label.association`), auto reply/mark read/reject call.
+2. Fase 3 lanjutan: `device.reachout_timelock` + pemetaan error 463 (riset SDK). Setelah itu Fase 3 tuntas → verifikasi live, lalu Fase 4 (newsletter, scheduler), auto reply/mark read/reject call.
 
 ## Keputusan yang sudah diambil
 
@@ -90,6 +90,7 @@
 
 ## Catatan / jebakan
 
+- Label: `label.edit` dari `LabelEditUpdate`, `label.association` dari `LabelAssociationUpdate` (hanya level chat; per-pesan `MessageLabelAssociationUpdate` sengaja tak diteruskan, sama dengan GOWA). Hanya field yang dikirim WhatsApp yang muncul. `predefined_id` dikirim sebagai **angka** (int32, perilaku kode GOWA) walau contoh dokumen menulis string `"1"`. `timestamp` = `action_timestamp` bila ada, selain itu waktu proses.
 - `message.deleted` (dari `DeleteMessageForMeUpdate`): seperti GOWA, hanya dikirim bila salinan pesan ada di storage device itu (dicari per id, lalu baris dihapus); tanpa `timestamp` top-level (ada di payload, = waktu proses). `from` = peserta bila disebut, selain itu akun sendiri bila `from_me`, selain itu chat (SDK tak punya `SenderJID` whatsmeow persis). `chat_id` = chat tersimpan, `chat_lid` bila event menyebut chat dengan LID.
 - Presence sendiri (`device/presence.rs`): saat `Connected` dikirim `WHATSAPP_PRESENCE_ON_CONNECT` (`available`/`unavailable`/`none`, default `unavailable`, nilai lain = unavailable seperti GOWA). Pulse (default aktif): tiap menit tiap device yang connected & login dicek; bila ≥ `WHATSAPP_PRESENCE_PULSE_INTERVAL` (24h) sejak pulse sukses terakhir → available, tidur `..._DURATION` (5m), lalu unavailable. Pulse gagal dicoba lagi pada cek berikutnya. Durasi memakai subset `time.ParseDuration` Go (`h m s ms`, bisa digabung); nilai 0/negatif **ditolak** saat start (GOWA diam-diam memakai default). Efek samping (dari dokumen GOWA): akun *available* menekan notifikasi di HP — makanya default `unavailable`. Pulse jalan per proses, state `last` hanya di memori (restart → pulse langsung).
 - Event `presence`: `timestamp` = waktu proses (GOWA `time.Now()`), `last_seen` hanya bila SDK memberi nilai. WhatsApp hanya mengirimnya untuk kontak yang sudah di-subscribe (`/user/presence/subscribe`) dan selama akun berstatus *available*; presence pulse/`WHATSAPP_PRESENCE_ON_CONNECT` belum ada, jadi event bisa jarang muncul (lihat catatan `chat_presence`).
@@ -151,6 +152,9 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — Fase 3: `label.edit`, `label.association`
+- `events::label_edit_envelope` (`LabelEditView`), `label_association_envelope`; handler `LabelEditUpdate`/`LabelAssociationUpdate` di `processor.rs`. Test: golden `label_events` (contoh dokumen + sparse + LID). Belum diuji dengan akun live (cek: buat/ubah label & beri label ke chat di WhatsApp Business).
 
 ### 2026-11-24 — Fase 3: `message.deleted`
 - `events::message_deleted_envelope` + `DeletedView`; handler `Event::DeleteMessageForMeUpdate` di `processor.rs` (hapus baris + webhook). Test: golden `message_deleted_event` (+ media/LID). Belum diuji dengan akun live (cek: "hapus untuk saya" dari HP → webhook + pesan hilang dari `/chat/{jid}/messages`).

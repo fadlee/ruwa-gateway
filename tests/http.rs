@@ -1430,3 +1430,43 @@ async fn send_sticker_contract() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn send_poll_contract() {
+    let h = harness().await;
+    for (body, msg) in [
+        (r#"{"phone":"628"}"#, "options: cannot be blank."),
+        (
+            r#"{"options":["a","b"]}"#,
+            "max_answer: cannot be blank; phone: cannot be blank; question: cannot be blank.",
+        ),
+        (
+            r#"{"phone":"628","question":"q","options":["a",""],"max_answer":1}"#,
+            "options: (1: cannot be blank.).",
+        ),
+        (
+            r#"{"phone":"628","question":"q","options":["a","b"],"max_answer":3}"#,
+            "max_answer: must be no greater than 2.",
+        ),
+        (
+            r#"{"phone":"628","question":"q","options":["a","b"],"max_answer":-1}"#,
+            "max_answer: must be no less than 1.",
+        ),
+        (
+            r#"{"phone":"628","question":"q","options":["a","a"],"max_answer":1}"#,
+            "options should be unique",
+        ),
+    ] {
+        expect_validation(&h, post_json("/send/poll", body), msg).await;
+    }
+    let (status, resp) = call(
+        &h.app,
+        post_json(
+            "/send/poll",
+            r#"{"phone":"628123","question":"q","options":["a","b"],"max_answer":1}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(resp["code"], "AUTHENTICATION_ERROR");
+}

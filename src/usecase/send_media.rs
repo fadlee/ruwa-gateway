@@ -1023,3 +1023,162 @@ pub async fn send_sticker(
     };
     Ok(SendResponse { message_id, status })
 }
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct PollRequest {
+    pub phone: String,
+    pub duration: Option<i64>,
+    pub question: String,
+    pub options: Vec<String>,
+    pub max_answer: i64,
+}
+
+/// GOWA `ValidateSendPoll` (ozzo messages, same order of checks).
+fn validate_poll(req: &PollRequest) -> ApiResult<()> {
+    use std::collections::BTreeMap;
+    if req.options.is_empty() {
+        return Err(ApiError::validation("options: cannot be blank."));
+    }
+    if req.max_answer > i64::from(u32::MAX) {
+        return Err(ApiError::validation(format!(
+            "max_answer: must be no greater than {}.",
+            u32::MAX
+        )));
+    }
+    let mut errors: BTreeMap<&str, String> = BTreeMap::new();
+    if req.phone.is_empty() {
+        errors.insert("phone", "cannot be blank".into());
+    }
+    if req.question.is_empty() {
+        errors.insert("question", "cannot be blank".into());
+    }
+    let blank: Vec<String> = req
+        .options
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.is_empty())
+        .map(|(i, _)| format!("{i}: cannot be blank."))
+        .collect();
+    if !blank.is_empty() {
+        errors.insert("options", format!("({})", blank.join("; ")));
+    }
+    let max = req.options.len() as i64;
+    if req.max_answer == 0 {
+        errors.insert("max_answer", "cannot be blank".into());
+    } else if req.max_answer < 1 {
+        errors.insert("max_answer", "must be no less than 1".into());
+    } else if req.max_answer > max {
+        errors.insert("max_answer", format!("must be no greater than {max}"));
+    }
+    super::chat::ozzo(errors)?;
+    validate_phone_number(&req.phone)?;
+    validate_duration(req.duration)?;
+    let mut seen = std::collections::HashSet::new();
+    if !req.options.iter().all(|o| seen.insert(o)) {
+        return Err(ApiError::validation("options should be unique"));
+    }
+    Ok(())
+}
+
+/// Poll creation message as WA Web / whatsmeow `BuildPollCreation`: v3 for a
+/// single-select poll, v1 otherwise, plus a fresh 32-byte message secret.
+fn poll_message(
+    question: &str,
+    options: &[String],
+    max_answer: u32,
+    duration: Option<i64>,
+) -> proto::Message {
+    use sdk::waproto::buffa::MessageField;
+    let mut poll = proto::message::PollCreationMessage::default();
+    poll.name = Some(question.to_owned());
+    poll.options = options
+        .iter()
+        .map(|name| {
+            let mut o = proto::message::poll_creation_message::Option::default();
+            o.option_name = Some(name.clone());
+            o
+        })
+        .collect();
+    poll.selectable_options_count = Some(max_answer);
+    poll.poll_content_type = Some(proto::message::PollContentType::TEXT);
+    if let Some(d) = duration.filter(|d| *d > 0) {
+        let mut ci = proto::ContextInfo::default();
+        ci.expiration = Some(d as u32);
+        poll.context_info = MessageField::some(ci);
+    }
+    let mut message = proto::Message::default();
+    if max_answer == 1 {
+        message.poll_creation_message_v3 = MessageField::some(poll);
+    } else {
+        message.poll_creation_message = MessageField::some(poll);
+    }
+    let mut secret = uuid::Uuid::new_v4().as_bytes().to_vec();
+    secret.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let mut info = proto::MessageContextInfo::default();
+    info.message_secret = Some(secret);
+    message.message_context_info = MessageField::some(info);
+    message
+}
+
+/// `POST /send/poll` (GOWA `SendPoll`). Vote resolution storage
+/// (`poll_definitions`) is not kept yet.
+pub async fn send_poll(
+    device: &DeviceInstance,
+    mut req: PollRequest,
+    settings: SendSettings,
+) -> ApiResult<SendResponse> {
+    req.phone = jid::sanitize_phone(&req.phone);
+    validate_poll(&req)?;
+    let (client, recipient) = prologue(device, &req.phone, settings).await?;
+    let message = poll_message(
+        &req.question,
+        &req.options,
+        req.max_answer as u32,
+        req.duration,
+    );
+    let label = format!("📊 {}", req.question);
+    let message_id = deliver(device, &client, &recipient, message, &label).await?;
+    Ok(SendResponse {
+        status: format!(
+            "Send poll success {} (server timestamp: {})",
+            req.phone,
+            server_time()
+        ),
+        message_id,
+    })
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use super::*;
+
+    #[test]
+    fn poll_message_shape() {
+        let opts = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let single = poll_message("q", &opts, 1, None);
+        assert!(single.poll_creation_message_v3.is_set());
+        assert!(single.poll_creation_message.is_unset());
+
+        let multi = poll_message("q", &opts, 2, Some(86_400));
+        let poll = multi.poll_creation_message.as_option().expect("v1 poll");
+        assert_eq!(poll.name.as_deref(), Some("q"));
+        assert_eq!(poll.options.len(), 3);
+        assert_eq!(poll.selectable_options_count, Some(2));
+        assert_eq!(
+            poll.context_info.as_option().and_then(|c| c.expiration),
+            Some(86_400)
+        );
+        let secret = multi.message_context_info.as_option().unwrap();
+        assert_eq!(secret.message_secret.as_ref().map(Vec::len), Some(32));
+        // Each poll gets its own secret.
+        assert_ne!(
+            secret.message_secret,
+            single
+                .message_context_info
+                .as_option()
+                .unwrap()
+                .message_secret
+        );
+    }
+}

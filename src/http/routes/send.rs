@@ -20,7 +20,7 @@ use crate::{
         send::{self, MessageRequest, SendResponse},
         send_media::{
             self as sm, AudioRequest, ChatPresenceRequest, ContactRequest, FileRequest,
-            ImageRequest, LinkRequest, LocationRequest, PresenceRequest, SendSettings,
+            ImageRequest, LinkRequest, LocationRequest, PollRequest, PresenceRequest, SendSettings,
             StickerRequest, VideoRequest,
         },
     },
@@ -37,6 +37,7 @@ pub fn router() -> Router<AppState> {
         .route("/send/location", post(send_location))
         .route("/send/link", post(send_link))
         .route("/send/sticker", post(send_sticker))
+        .route("/send/poll", post(send_poll))
         .route("/send/presence", post(send_presence))
         .route("/send/chat-presence", post(send_chat_presence))
         // GOWA sets Fiber's BodyLimit to the max video size.
@@ -181,4 +182,12 @@ async fn send_sticker(
         settings(&state),
     )
     .await?))
+}
+
+async fn send_poll(
+    State(state): State<AppState>,
+    Extension(Device(device)): Extension<Device>,
+    Body(req): Body<PollRequest>,
+) -> ApiResult<Response> {
+    Ok(ok(sm::send_poll(&device, req, settings(&state)).await?))
 }

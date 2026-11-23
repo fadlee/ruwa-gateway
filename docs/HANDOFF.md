@@ -6,8 +6,8 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence` selesai; berikutnya `/send/poll`, sisa `/user/*` (my/newsletters, business-profile), label/call.
-- **Build**: `cargo test` (159 test: 118 unit + 41 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence|poll` selesai; berikutnya sisa `/user/*` (my/newsletters, business-profile), label/call.
+- **Build**: `cargo test` (162 test: 119 unit + 42 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -44,7 +44,7 @@
    Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
    `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
    `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
-2. Fase 3 lanjutan: `/send/poll`, sisa `/user/*` (my/newsletters, business-profile), event label/call, auto reply/mark read/reject call.
+2. Fase 3 lanjutan: sisa `/user/*` (my/newsletters, business-profile), event label/call, auto reply/mark read/reject call.
 
 ## Keputusan yang sudah diambil
 
@@ -90,6 +90,7 @@
 
 ## Catatan / jebakan
 
+- Poll: pesan dibangun sendiri (SDK `polls().create` tak bisa menambah `expiration`): v3 bila `max_answer == 1`, v1 selain itu, `message_secret` 32 byte acak, dikirim lewat `deliver`. Belum: tabel `poll_definitions` (GOWA menyimpannya untuk meresolusi vote) dan event/endpoint vote; batas SDK (2–12 opsi) tidak divalidasi di sisi kita — server yang menolak.
 - Sticker: WebP animasi dikenali dari header (VP8X flag, tanpa `webpmux`) → wajib 512x512 & <500KB, dikirim apa adanya; selain itu didecode (GIF = frame pertama), dipas ke 512x512, dikonversi WebP lossy q60 lewat ffmpeg (GOWA sama), atau **lossless** lewat crate `image` bila ffmpeg tak ada (file lebih besar; GOWA gagal 500 tanpa ffmpeg/cwebp). WebP animasi invalid-dimensi → 400. `/send/presence` dengan `type` kosong → 400 (GOWA lolos validasi lalu gagal di whatsmeow). Chat-presence tidak ada media (`composing`/`paused` saja).
 - Event grup: `Add` → `group.participants` join (+ `group.joined` bila akun sendiri ada di daftar), `Remove` → leave, `Promote`/`Demote`; `Subject` → `group.info` + nama chat tersimpan diganti (`rename_chat`, hanya bila chat sudah ada). Belum: `Create` (raw node) tidak memicu `group.joined`; `reason` hanya `invite`/kosong (whatsmeow punya jenis lain); `Modify`, description, locked/announce tidak dikirim (GOWA juga tidak). `group.joined` dikirim berdampingan dengan `group.participants` untuk akun sendiri — belum dicek apakah whatsmeow melakukan hal sama.
 - Cold build pertama ~4,5 menit (whatsapp-rust besar). Clippy cold ~2 menit.
@@ -145,6 +146,9 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — Fase 3: `/send/poll`
+- `usecase/send_media.rs`: `validate_poll` (pesan ozzo GOWA), `poll_message`, `send_poll`. Test: `send_poll_contract`, unit `poll_message_shape`. Belum diuji dengan akun live (cek: poll muncul di HP, pilih jawaban, duration/expiry).
 
 ### 2026-11-24 — Fase 3: `/send/sticker`, `/send/presence`, `/send/chat-presence`
 - `usecase/send_media.rs`: `send_sticker`, `send_presence`, `send_chat_presence`; `media/image.rs`: `webp_info`, `sticker_png`, `png_to_webp_lossless`; `media/ffmpeg.rs`: `png_to_webp`. Route di `http/routes/send.rs`.

@@ -80,6 +80,10 @@ pub(super) struct MediaSettings {
     pub dir: PathBuf,
     pub auto_download: bool,
     pub auto_reject_call: bool,
+    /// `WHATSAPP_AUTO_MARK_READ`.
+    pub auto_mark_read: bool,
+    /// `WHATSAPP_AUTO_REPLY` text; empty disables it.
+    pub auto_reply: String,
 }
 
 pub(super) async fn run(
@@ -202,6 +206,8 @@ async fn handle(
                 {
                     tracing::error!(device = %device.id(), id = %m.id, %error, "failed to store incoming message");
                 }
+                auto_mark_read(&client, media, &m).await;
+                auto_reply(device, &client, media, &m).await;
                 let (name, payload) = events::message_payload(&resolver, &m).await;
                 let mut env = events::envelope(name, &device.jid().unwrap_or_default(), payload);
                 add_session_id(device, &mut env);
@@ -371,7 +377,83 @@ async fn handle(
     }
 }
 
-/// GOWA `addWebhookSessionID`: tag events with the slot that emitted them.
+/// `WHATSAPP_AUTO_MARK_READ` (GOWA `handleAutoMarkRead`): incoming only.
+async fn auto_mark_read(client: &Client, media: &MediaSettings, m: &IncomingMessage) {
+    if !media.auto_mark_read || m.is_from_me {
+        return;
+    }
+    let sender = (m.chat.server == Server::Group).then_some(&m.sender);
+    let ids = [m.id.as_str()];
+    if let Err(error) = client.mark_as_read(&m.chat, sender, &ids).await {
+        tracing::warn!(id = %m.id, %error, "failed to auto-mark message as read");
+    }
+}
+
+/// Whether the message carries genuine typed text (not a caption), also
+/// inside an edit (GOWA `handleAutoReply`).
+fn has_typed_text(msg: &crate::wa::proto::Message) -> bool {
+    let msg = crate::wa::message::unwrap(msg);
+    let text = |m: &crate::wa::proto::Message| {
+        m.conversation.as_deref().is_some_and(|t| !t.is_empty())
+            || m.extended_text_message
+                .as_option()
+                .and_then(|e| e.text.as_deref())
+                .is_some_and(|t| !t.is_empty())
+    };
+    text(msg)
+        || msg
+            .protocol_message
+            .as_option()
+            .and_then(|p| p.edited_message.as_option())
+            .is_some_and(text)
+}
+
+/// `WHATSAPP_AUTO_REPLY` (GOWA `handleAutoReply`): plain text to 1:1 chats
+/// only, never to groups, broadcasts, or our own messages.
+async fn auto_reply(
+    device: &Arc<DeviceInstance>,
+    client: &Client,
+    media: &MediaSettings,
+    m: &IncomingMessage,
+) {
+    use crate::wa::sdk::prelude::SendRequest;
+
+    if media.auto_reply.is_empty()
+        || m.is_from_me
+        || !matches!(m.chat.server, Server::Pn | Server::Lid)
+        || !has_typed_text(&m.message)
+    {
+        return;
+    }
+    let mut reply = crate::wa::proto::Message::default();
+    reply.conversation = Some(media.auto_reply.clone());
+    let sent = match client
+        .send(SendRequest::new(&m.sender.to_non_ad(), reply.clone()))
+        .await
+    {
+        Ok(sent) => sent,
+        Err(error) => {
+            tracing::error!(device = %device.id(), %error, "failed to send auto-reply");
+            return;
+        }
+    };
+    let own = own_jid(client).map(|j| j.to_string()).unwrap_or_default();
+    if let Err(error) = super::store_sent(
+        device.chats(),
+        &device.storage_partition(),
+        &own,
+        &m.sender.to_non_ad(),
+        sent.message_id.as_ref(),
+        &media.auto_reply,
+        super::now(),
+        &reply,
+    )
+    .await
+    {
+        tracing::warn!(%error, "failed to store auto-reply");
+    }
+}
+
 /// Offer → optional auto-reject (`WHATSAPP_AUTO_REJECT_CALL`, 10 s) and the
 /// `call.offer` webhook (GOWA `handleCallOffer`). Other call actions are ignored.
 async fn incoming_call(
@@ -562,6 +644,7 @@ async fn group_update(
     }
 }
 
+/// GOWA `addWebhookSessionID`: tag events with the slot that emitted them.
 fn add_session_id(device: &DeviceInstance, env: &mut serde_json::Map<String, Value>) {
     if device.jid().is_some() {
         env.entry("session_id")
@@ -737,5 +820,35 @@ impl Resolver for ClientResolver {
         let path = self.media.dir.join(&name);
         tokio::fs::write(&path, &bytes).await?;
         Ok(path.to_string_lossy().into_owned())
+    }
+}
+
+#[cfg(test)]
+mod auto_reply_tests {
+    use super::*;
+    use crate::wa::{message as msgx, proto, sdk::waproto::buffa::MessageField};
+
+    #[test]
+    fn typed_text_detection() {
+        assert!(has_typed_text(&msgx::conversation("hi")));
+        assert!(!has_typed_text(&msgx::conversation("")));
+        assert!(has_typed_text(&msgx::extended_text(
+            "hi",
+            proto::ContextInfo::default()
+        )));
+
+        // A caption is not typed text.
+        let mut image = proto::message::ImageMessage::default();
+        image.caption = Some("caption".into());
+        let mut msg = proto::Message::default();
+        msg.image_message = MessageField::some(image);
+        assert!(!has_typed_text(&msg));
+
+        // An edit of a text message counts.
+        let mut protocol = proto::message::ProtocolMessage::default();
+        protocol.edited_message = MessageField::some(msgx::conversation("fixed"));
+        let mut edit = proto::Message::default();
+        edit.protocol_message = MessageField::some(protocol);
+        assert!(has_typed_text(&edit));
     }
 }

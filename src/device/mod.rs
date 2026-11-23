@@ -51,6 +51,10 @@ pub struct DeviceOptions {
     pub auto_download_media: bool,
     /// `WHATSAPP_AUTO_REJECT_CALL`.
     pub auto_reject_call: bool,
+    /// `WHATSAPP_AUTO_MARK_READ`.
+    pub auto_mark_read: bool,
+    /// `WHATSAPP_AUTO_REPLY` text; empty disables it.
+    pub auto_reply: String,
 }
 
 pub struct DeviceManager {
@@ -115,6 +119,8 @@ impl DeviceManager {
                 dir: manager.opts.media_dir.clone(),
                 auto_download: manager.opts.auto_download_media,
                 auto_reject_call: manager.opts.auto_reject_call,
+                auto_mark_read: manager.opts.auto_mark_read,
+                auto_reply: manager.opts.auto_reply.clone(),
             },
             manager.hub.clone(),
         ));

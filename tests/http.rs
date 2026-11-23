@@ -50,6 +50,8 @@ async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Har
             media_dir: dir.path().join("statics/media"),
             auto_download_media: true,
             auto_reject_call: false,
+            auto_mark_read: false,
+            auto_reply: String::new(),
         },
         db.clone(),
         Dispatcher::new(WebhookConfig::default()).unwrap(),

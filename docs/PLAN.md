@@ -58,6 +58,7 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 - [x] `/send/poll`
 - [x] `/user/my/newsletters`, `/user/business-profile`
 - [x] `/call/reject`, event `call.offer`, `WHATSAPP_AUTO_REJECT_CALL`
+- [x] `WHATSAPP_AUTO_REPLY`, `WHATSAPP_AUTO_MARK_READ`
 - [x] Event `group.participants|info|joined` (dari `GroupUpdate`)
 - [ ] Event: `message.deleted`, `presence`, `label.*`, `device.reachout_timelock`
 - [ ] Auto reply, auto mark read, auto reject call

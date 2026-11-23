@@ -29,7 +29,7 @@ Error dirender `Recovery` middleware GOWA sebagai `{code, message, results?}`:
 | 500 | `WEBHOOK_ERROR` | (bervariasi) | `WebhookError` | log saja |
 | 500 | `INVALID_WA_CLI` | `your WhatsApp CLI is invalid or empty` | `ErrWaCLI` | — (pakai `AUTHENTICATION_ERROR` not connected) |
 | 500 | `UPLOAD_MEDIA_ERROR` | (bervariasi) | `WaUploadMediaError` | Fase 2 |
-| 429 | `WA_REACHOUT_TIMELOCK` | teks panjang error 463 | `ErrWaReachoutTimelock` | Fase 3 |
+| 429 | `WA_REACHOUT_TIMELOCK` | teks panjang error 463 | `ErrWaReachoutTimelock` | ✅ (dari nack server 463) |
 | 404 | `AVATAR_NOT_SET` | (bervariasi) | `AvatarNotSetError` | Fase 3 |
 | 403 | `AVATAR_HIDDEN` | (bervariasi) | `AvatarHiddenError` | Fase 3 |
 | 404 | `DEVICE_NOT_FOUND` | `device not found; create a device first from /api/devices or provide a valid X-Device-Id` + `results.device_id` | `DeviceMiddleware` | ✅ |

@@ -323,6 +323,10 @@ pub(crate) async fn deliver(
         .await
         .map_err(send_error)?;
     let message_id = sent.message_id.to_string();
+    // whatsmeow waits for the server ack, so a nack (463 …) fails the request.
+    if let Some(Some(code)) = device.acks.wait(&message_id, ACK_WAIT).await {
+        return Err(nack_error(&code));
+    }
     let own = client
         .pn()
         .map(|pn| pn.to_non_ad().to_string())
@@ -362,6 +366,25 @@ pub(crate) fn base_context(is_forwarded: bool, duration: Option<i64>) -> proto::
         ci.expiration = Some(d as u32);
     }
     ci
+}
+
+/// How long a send waits for the server's verdict before assuming success.
+const ACK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// GOWA `ErrWaReachoutTimelock` text.
+const REACHOUT_TIMELOCK: &str = "WhatsApp rejected this send with error 463 (reach-out timelock). This is WhatsApp's server-side anti-spam restriction on starting new chats and cannot be bypassed by the API. It usually means there is no prior conversation with this recipient, or the sending account is temporarily restricted from reaching new contacts. To get through: ask the recipient to message you first, reply within an already-established conversation, or open and send the chat once from the phone linked to this session, then reduce your sending rate and wait for the restriction to clear. Newly-linked or low-activity numbers are affected most.";
+
+/// A server nack of a sent message: 463 → `WA_REACHOUT_TIMELOCK` (429), any
+/// other code → whatsmeow's `server returned error N` (500).
+pub(crate) fn nack_error(code: &str) -> ApiError {
+    if code == "463" {
+        return ApiError::new(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "WA_REACHOUT_TIMELOCK",
+            REACHOUT_TIMELOCK,
+        );
+    }
+    ApiError::internal(format!("server returned error {code}"))
 }
 
 pub(crate) fn send_error(error: SendError) -> ApiError {
@@ -441,5 +464,18 @@ mod tests {
     fn go_time_format() {
         let t = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
         assert_eq!(go_time_string(t), "2023-11-14 22:13:20 +0000 UTC");
+    }
+
+    #[test]
+    fn nack_463_is_reachout_timelock() {
+        let e = nack_error("463");
+        assert_eq!(e.status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(e.code, "WA_REACHOUT_TIMELOCK");
+        assert!(
+            e.message
+                .starts_with("WhatsApp rejected this send with error 463")
+        );
+        let other = nack_error("479");
+        assert_eq!(other.message, "server returned error 479");
     }
 }

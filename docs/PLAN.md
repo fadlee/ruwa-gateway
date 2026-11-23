@@ -63,7 +63,7 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 - [x] `WHATSAPP_AUTO_REPLY`, `WHATSAPP_AUTO_MARK_READ`
 - [x] Event `group.participants|info|joined` (dari `GroupUpdate`)
 - [x] Event `label.edit`, `label.association`
-- [ ] Event `device.reachout_timelock` (butuh riset error 463, lihat HANDOFF)
+- [x] Event `device.reachout_timelock` + error 463 → `WA_REACHOUT_TIMELOCK` (via `Event::ServerAck`)
 
 ## Fase 4 — M4: newsletter, scheduler, UI
 

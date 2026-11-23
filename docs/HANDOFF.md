@@ -6,8 +6,8 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence|poll` selesai; `/user/*`, `/call/reject`, `call.offer` + auto-reject selesai; auto reply + auto mark read selesai; event `presence` + presence on-connect/pulse selesai; event label selesai; sisa `device.reachout_timelock` (+ error 463 → `WA_REACHOUT_TIMELOCK`), lalu verifikasi live dan Fase 4.
-- **Build**: `cargo test` (173 test: 129 unit + 44 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Fase aktif**: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence|poll` selesai; `/user/*`, `/call/reject`, `call.offer` + auto-reject selesai; auto reply + auto mark read selesai; event `presence` + presence on-connect/pulse selesai; semua event webhook Fase 3 + error 463 selesai → **Fase 3 tuntas (kode)**; berikutnya verifikasi live, lalu Fase 4.
+- **Build**: `cargo test` (178 test: 134 unit + 44 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -44,7 +44,7 @@
    Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
    `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
    `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
-2. Fase 3 lanjutan: `device.reachout_timelock` + pemetaan error 463 (riset SDK). Setelah itu Fase 3 tuntas → verifikasi live, lalu Fase 4 (newsletter, scheduler), auto reply/mark read/reject call.
+2. Fase 3 tuntas di sisi kode. Verifikasi live (daftar "Belum terverifikasi" di atas), lalu Fase 4 (newsletter, scheduler), auto reply/mark read/reject call.
 
 ## Keputusan yang sudah diambil
 
@@ -90,6 +90,8 @@
 
 ## Catatan / jebakan
 
+- Nack kirim (463 dst.): whatsapp-rust kembali dari `send` sebelum server menjawab; jawabannya datang sebagai `Event::ServerAck` (`class=message`, `error=Some(code)`). `device/acks.rs` (`AckBook`, 512 id terakhir per device) menyimpannya dan `usecase::send::deliver` menunggu verdict id-nya **maks 5 dtk** (whatsmeow menunggu ack penuh): `463` → 429 `WA_REACHOUT_TIMELOCK` (teks GOWA), kode lain → 500 `server returned error N`; nack → pesan **tidak** disimpan. Tanpa ack dalam 5 dtk → dianggap sukses. Efek samping: tiap kirim kini menunggu ack (biasanya ratusan ms). Ack juga membawa timestamp server (belum dipakai untuk `status` kirim — gap lama).
+- `device.reachout_timelock`: `ends_at` dari `time_enforcement_ends` (detik unix, string), dikirim juga ke WS `DEVICE_REACHOUT_TIMELOCK`.
 - Label: `label.edit` dari `LabelEditUpdate`, `label.association` dari `LabelAssociationUpdate` (hanya level chat; per-pesan `MessageLabelAssociationUpdate` sengaja tak diteruskan, sama dengan GOWA). Hanya field yang dikirim WhatsApp yang muncul. `predefined_id` dikirim sebagai **angka** (int32, perilaku kode GOWA) walau contoh dokumen menulis string `"1"`. `timestamp` = `action_timestamp` bila ada, selain itu waktu proses.
 - `message.deleted` (dari `DeleteMessageForMeUpdate`): seperti GOWA, hanya dikirim bila salinan pesan ada di storage device itu (dicari per id, lalu baris dihapus); tanpa `timestamp` top-level (ada di payload, = waktu proses). `from` = peserta bila disebut, selain itu akun sendiri bila `from_me`, selain itu chat (SDK tak punya `SenderJID` whatsmeow persis). `chat_id` = chat tersimpan, `chat_lid` bila event menyebut chat dengan LID.
 - Presence sendiri (`device/presence.rs`): saat `Connected` dikirim `WHATSAPP_PRESENCE_ON_CONNECT` (`available`/`unavailable`/`none`, default `unavailable`, nilai lain = unavailable seperti GOWA). Pulse (default aktif): tiap menit tiap device yang connected & login dicek; bila ≥ `WHATSAPP_PRESENCE_PULSE_INTERVAL` (24h) sejak pulse sukses terakhir → available, tidur `..._DURATION` (5m), lalu unavailable. Pulse gagal dicoba lagi pada cek berikutnya. Durasi memakai subset `time.ParseDuration` Go (`h m s ms`, bisa digabung); nilai 0/negatif **ditolak** saat start (GOWA diam-diam memakai default). Efek samping (dari dokumen GOWA): akun *available* menekan notifikasi di HP — makanya default `unavailable`. Pulse jalan per proses, state `last` hanya di memori (restart → pulse langsung).
@@ -120,8 +122,6 @@
     download/forward re-upload gagal dengan pesan error biasa.
   - `/message/*/download`: `file_url` selalu `http://<Host>`; GOWA memakai skema Fiber (https bila TLS/proxy tepercaya).
   - Forward: field jadwal (`scheduled_at`, dll.) diabaikan → Fase 4.
-  - Error 463 (reach-out timelock) belum dipetakan ke `WA_REACHOUT_TIMELOCK`; di whatsapp-rust 463 datang
-    lewat ack server, bukan `SendError` → perlu riset.
   - `allow_reshare` divalidasi tapi flag reshare belum dipasang ke pesan status.
   - Status message `/send/message` memakai waktu lokal server (UTC), bukan timestamp ack server.
   - `qr_duration` = setengah timeout QR dari whatsapp-rust (hasil live: 29), GOWA/whatsmeow biasanya 30.
@@ -152,6 +152,9 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — Fase 3: `device.reachout_timelock` + error 463
+- `device/acks.rs` (`AckBook`) + `Event::ServerAck` di `processor.rs`; `deliver` menunggu ack; `nack_error`. `Event::ReachoutTimelockUpdate` → webhook `device.reachout_timelock` + hub WS. Test: unit `AckBook` (3), `nack_463_is_reachout_timelock`, golden `device_reachout_timelock`. Belum diuji dengan akun live (cek: kirim ke nomor yang belum pernah chat dengan akun terbatasi → 429; kirim normal tidak jadi lambat).
 
 ### 2026-11-24 — Fase 3: `label.edit`, `label.association`
 - `events::label_edit_envelope` (`LabelEditView`), `label_association_envelope`; handler `LabelEditUpdate`/`LabelAssociationUpdate` di `processor.rs`. Test: golden `label_events` (contoh dokumen + sparse + LID). Belum diuji dengan akun live (cek: buat/ubah label & beri label ke chat di WhatsApp Business).

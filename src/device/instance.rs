@@ -65,6 +65,8 @@ pub struct DeviceInstance {
     pub(super) contacts_resyncing: AtomicBool,
     /// Groups already seen in this process; the first sighting kicks the queue.
     pub(super) seen_groups: StdMutex<HashSet<String>>,
+    /// Server verdicts for recently sent messages.
+    pub acks: super::acks::AckBook,
 }
 
 impl DeviceInstance {
@@ -92,6 +94,7 @@ impl DeviceInstance {
             group_names_running: AtomicBool::new(false),
             contacts_resyncing: AtomicBool::new(false),
             seen_groups: StdMutex::new(HashSet::new()),
+            acks: Default::default(),
         }
     }
 

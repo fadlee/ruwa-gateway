@@ -444,6 +444,7 @@ fn other_types(msg: &proto::Message, p: &mut Map<String, Value>) {
 
 pub const CHAT_PRESENCE: &str = "chat_presence";
 pub const DEVICE_TEMPORARY_BAN: &str = "device.temporary_ban";
+pub const DEVICE_REACHOUT_TIMELOCK: &str = "device.reachout_timelock";
 pub const LABEL_EDIT: &str = "label.edit";
 pub const LABEL_ASSOCIATION: &str = "label.association";
 pub const MESSAGE_DELETED: &str = "message.deleted";
@@ -511,6 +512,23 @@ pub fn temp_ban_reason(code: i32) -> &'static str {
 }
 
 /// GOWA `temporaryBanPayload`.
+/// `device.reachout_timelock` payload (GOWA `reachoutTimelockPayload`);
+/// `enforcement_type` and `ends_at` are omitted when empty.
+pub fn reachout_timelock_payload(
+    is_active: bool,
+    enforcement_type: &str,
+    ends_at: Option<i64>,
+) -> Value {
+    let mut v = json!({ "is_active": is_active });
+    if !enforcement_type.is_empty() {
+        v["enforcement_type"] = enforcement_type.into();
+    }
+    if let Some(at) = ends_at {
+        v["ends_at"] = rfc3339(at).into();
+    }
+    v
+}
+
 pub fn temporary_ban_payload(code: i32, expire_secs: i64, now: i64) -> Value {
     let mut v = json!({
         "code": code,

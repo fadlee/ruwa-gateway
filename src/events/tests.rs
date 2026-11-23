@@ -786,3 +786,19 @@ async fn label_events() {
     assert_eq!(lid["payload"]["chat_id"], "628987654321@s.whatsapp.net");
     assert_eq!(lid["payload"]["labeled"], false);
 }
+
+#[test]
+fn device_reachout_timelock() {
+    let actual = Value::Object(device_envelope(
+        DEVICE_REACHOUT_TIMELOCK,
+        "org_2",
+        Some("628123456789@s.whatsapp.net"),
+        reachout_timelock_payload(true, "", Some(secs("2026-10-28T21:00:00Z"))),
+        secs("2026-10-28T09:00:00Z"),
+    ));
+    assert_matches_doc(&actual, &doc_example("Device Reach-out Timelock"));
+    assert_eq!(
+        reachout_timelock_payload(false, "BIZ", None),
+        json!({"is_active": false, "enforcement_type": "BIZ"})
+    );
+}

@@ -7,6 +7,7 @@
 //! device ids are arbitrary strings. Only slots with a recorded JID reconnect
 //! at startup, so an unpaired slot never starts emitting QR codes on its own.
 
+pub mod acks;
 mod backfill;
 pub mod hub;
 mod ingest;

@@ -65,6 +65,8 @@ const KINDS: &[EventKind] = &[
     EventKind::DeleteMessageForMeUpdate,
     EventKind::LabelEditUpdate,
     EventKind::LabelAssociationUpdate,
+    EventKind::ReachoutTimelockUpdate,
+    EventKind::ServerAck,
 ];
 
 impl EventHandler for Relay {
@@ -461,6 +463,47 @@ async fn handle(
             .await;
             add_session_id(device, &mut env);
             webhook.send(events::LABEL_ASSOCIATION, env, &device.webhook());
+        }
+        Event::ServerAck(ack) => {
+            // Only a sent message's verdict matters (see `device::acks`).
+            if ack.class.as_deref() == Some("message") {
+                device.acks.record(&ack.id, ack.error.clone());
+            }
+        }
+        Event::ReachoutTimelockUpdate(update) => {
+            let state = &update.state;
+            let is_active = state.is_active.unwrap_or_default();
+            let ends_at = state
+                .time_enforcement_ends
+                .as_deref()
+                .and_then(|t| t.parse::<i64>().ok())
+                .filter(|t| *t > 0);
+            let payload = events::reachout_timelock_payload(
+                is_active,
+                state.enforcement_type.as_deref().unwrap_or_default(),
+                ends_at,
+            );
+            let message = if is_active {
+                let mut m = "Reach-out timelock active: WhatsApp is restricting this account from starting new chats".to_owned();
+                if let Some(at) = ends_at {
+                    m = format!("{m} until {}", events::rfc3339(at));
+                }
+                tracing::warn!(device = %device.id(), "{m}");
+                m
+            } else {
+                "Reach-out timelock lifted".to_owned()
+            };
+            let env = events::device_envelope(
+                events::DEVICE_REACHOUT_TIMELOCK,
+                device.id(),
+                device.jid().as_deref(),
+                payload.clone(),
+                super::now(),
+            );
+            webhook.send(events::DEVICE_REACHOUT_TIMELOCK, env, &device.webhook());
+            let mut result = payload;
+            result["device_id"] = device.id().into();
+            hub.publish("DEVICE_REACHOUT_TIMELOCK", message, result);
         }
         Event::Presence(update) => {
             use crate::wa::sdk::wacore::types::presence::PresenceStatus;

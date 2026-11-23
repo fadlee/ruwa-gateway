@@ -32,9 +32,9 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 
 ## Fase 2 — M2: multi-device + media
 
-- [ ] Registry `storages/ruwa.db` (diesel migrations), tabel `devices`
-- [ ] Semua `/devices/*` termasuk webhook per device
-- [ ] Restore semua device saat startup
+- [x] Registry `storages/ruwa.db` (diesel migrations), tabel `devices`
+- [x] Semua `/devices/*` termasuk webhook per device
+- [x] Restore semua device saat startup
 - [ ] Upload media: `/send/image|file|audio|video`, `/send/location|contact|link`
 - [ ] `/user/check`, `/user/info`
 - [ ] Event: `message.reaction|revoked|edited`, `chat_presence`, `device.temporary_ban`

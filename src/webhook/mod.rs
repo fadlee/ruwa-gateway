@@ -13,6 +13,8 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{Map, Value};
 use sha2::Sha256;
 
+use crate::storage::registry::DeviceWebhook;
+
 pub const SIGNATURE_HEADER: &str = "X-Hub-Signature-256";
 const MAX_ATTEMPTS: u32 = 5;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,29 +38,83 @@ pub struct WebhookConfig {
     pub insecure_skip_verify: bool,
 }
 
+/// Effective delivery target for one event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub urls: Vec<String>,
+    pub secret: String,
+    pub events: Vec<String>,
+    pub insecure_skip_verify: bool,
+}
+
 #[derive(Clone)]
 pub struct Dispatcher {
     config: WebhookConfig,
     http: reqwest::Client,
+    http_insecure: reqwest::Client,
 }
 
 impl Dispatcher {
     pub fn new(config: WebhookConfig) -> anyhow::Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .danger_accept_invalid_certs(config.insecure_skip_verify)
-            .build()?;
-        Ok(Self { config, http })
+        let build = |insecure| {
+            reqwest::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .danger_accept_invalid_certs(insecure)
+                .build()
+        };
+        Ok(Self {
+            config,
+            http: build(false)?,
+            http_insecure: build(true)?,
+        })
     }
 
-    pub fn is_enabled(&self) -> bool {
-        !self.config.urls.is_empty()
+    /// GOWA `forwardPayloadWithWebhookConfig`: a device override applies only
+    /// when it has a URL; its secret and event list fall back to the global
+    /// ones when empty.
+    pub fn target(&self, device: &DeviceWebhook) -> Target {
+        let Some(url) = device
+            .webhook_url
+            .as_deref()
+            .filter(|u| !u.trim().is_empty())
+        else {
+            return Target {
+                urls: self.config.urls.clone(),
+                secret: self.config.secret.clone(),
+                events: self.config.events.clone(),
+                insecure_skip_verify: self.config.insecure_skip_verify,
+            };
+        };
+        let secret = if device.webhook_secret.is_empty() {
+            self.config.secret.clone()
+        } else {
+            device.webhook_secret.clone()
+        };
+        let events = if device.webhook_events.trim().is_empty() {
+            self.config.events.clone()
+        } else {
+            device
+                .webhook_events
+                .split(',')
+                .map(|e| e.trim().to_owned())
+                .collect()
+        };
+        Target {
+            urls: vec![url.trim().to_owned()],
+            secret,
+            events,
+            insecure_skip_verify: device.webhook_insecure_skip_verify,
+        }
     }
 
     /// Filter, sign, and deliver `envelope` in the background.
     /// `envelope` must already carry `event`, `device_id`, `payload`.
-    pub fn send(&self, event: &str, envelope: Map<String, Value>) {
-        if !self.should_send(event, &envelope) {
+    pub fn send(&self, event: &str, envelope: Map<String, Value>, device: &DeviceWebhook) {
+        let target = self.target(device);
+        if target.urls.is_empty()
+            || !event_allowed(&target.events, event)
+            || jid_ignored(&self.config.ignore_jids, &envelope)
+        {
             tracing::debug!(event, "webhook skipped by filter");
             return;
         }
@@ -69,9 +125,14 @@ impl Dispatcher {
                 return;
             }
         };
-        let signature = sign(&body, &self.config.secret);
-        for url in self.config.urls.clone() {
-            let http = self.http.clone();
+        let signature = sign(&body, &target.secret);
+        let http = if target.insecure_skip_verify {
+            &self.http_insecure
+        } else {
+            &self.http
+        };
+        for url in target.urls {
+            let http = http.clone();
             let body = body.clone();
             let signature = signature.clone();
             let event = event.to_owned();
@@ -81,12 +142,6 @@ impl Dispatcher {
                 }
             });
         }
-    }
-
-    fn should_send(&self, event: &str, envelope: &Map<String, Value>) -> bool {
-        self.is_enabled()
-            && event_allowed(&self.config.events, event)
-            && !jid_ignored(&self.config.ignore_jids, envelope)
     }
 }
 
@@ -191,6 +246,53 @@ mod tests {
             sign(br#"{"a":1}"#, "secret"),
             "aa9e2e3575f5d7098b6caccd790888c36d5fdb63342a73bada2d6a51747a8494"
         );
+    }
+
+    fn dispatcher() -> Dispatcher {
+        Dispatcher::new(WebhookConfig {
+            urls: vec!["https://global".into()],
+            secret: "g".into(),
+            events: vec!["message".into()],
+            ignore_jids: vec![],
+            insecure_skip_verify: false,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn device_without_url_uses_global() {
+        let d = dispatcher();
+        let hook = DeviceWebhook {
+            webhook_secret: "dev".into(),
+            ..Default::default()
+        };
+        assert_eq!(d.target(&hook).urls, vec!["https://global"]);
+        assert_eq!(d.target(&hook).secret, "g");
+    }
+
+    #[test]
+    fn device_url_overrides_with_fallbacks() {
+        let d = dispatcher();
+        let mut hook = DeviceWebhook {
+            webhook_url: Some("https://dev".into()),
+            ..Default::default()
+        };
+        let t = d.target(&hook);
+        assert_eq!(
+            (t.urls, t.secret, t.events),
+            (
+                vec!["https://dev".to_owned()],
+                "g".to_owned(),
+                vec!["message".to_owned()]
+            )
+        );
+        hook.webhook_secret = "s".into();
+        hook.webhook_events = "message.ack, group.info".into();
+        hook.webhook_insecure_skip_verify = true;
+        let t = d.target(&hook);
+        assert_eq!(t.secret, "s");
+        assert_eq!(t.events, vec!["message.ack", "group.info"]);
+        assert!(t.insecure_skip_verify);
     }
 
     #[test]

@@ -35,6 +35,8 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 regex = "1"
 percent-encoding = "2"
+diesel = { version = "2.4", default-features = false, features = ["sqlite"] }
+diesel_migrations = { version = "2.4", default-features = false, features = ["sqlite"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

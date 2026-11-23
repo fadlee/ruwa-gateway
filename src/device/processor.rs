@@ -1,9 +1,6 @@
 //! Event pump: whatsapp-rust events → slot state + GOWA webhooks.
 
-use std::{
-    sync::{Arc, Weak, atomic::Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::{Arc, Weak, atomic::Ordering};
 
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -99,7 +96,7 @@ async fn handle(device: &Arc<DeviceInstance>, event: &Event, webhook: &Dispatche
         }
         Event::PairSuccess(ok) => {
             tracing::info!(device = %device.id(), jid = %ok.id, "paired");
-            device.set_jid(Some(ok.id.to_non_ad().to_string()));
+            device.set_jid(Some(ok.id.to_non_ad().to_string())).await;
         }
         Event::PairError(e) => {
             tracing::warn!(device = %device.id(), error = %e.error, "pairing failed");
@@ -108,7 +105,7 @@ async fn handle(device: &Arc<DeviceInstance>, event: &Event, webhook: &Dispatche
             if let Some(pn) = device.client().and_then(|c| c.pn()) {
                 let jid = pn.to_non_ad().to_string();
                 if device.jid().as_deref() != Some(jid.as_str()) {
-                    device.set_jid(Some(jid));
+                    device.set_jid(Some(jid)).await;
                 }
             }
             tracing::info!(device = %device.id(), "connected");
@@ -126,9 +123,9 @@ async fn handle(device: &Arc<DeviceInstance>, event: &Event, webhook: &Dispatche
                 device.id(),
                 device.jid().as_deref(),
                 events::logged_out_payload(out.reason.code(), out.on_connect),
-                now(),
+                super::now(),
             );
-            webhook.send(events::DEVICE_LOGGED_OUT, env);
+            webhook.send(events::DEVICE_LOGGED_OUT, env, &device.webhook());
             let device = device.clone();
             tokio::spawn(async move { device.wipe_session().await });
         }
@@ -140,19 +137,13 @@ async fn handle(device: &Arc<DeviceInstance>, event: &Event, webhook: &Dispatche
             for inbound in batch.messages.iter() {
                 let m = incoming(inbound);
                 remember(device, &resolver, &m).await;
-                if !webhook.is_enabled() {
-                    continue;
-                }
                 let (name, payload) = events::message_payload(&resolver, &m).await;
                 let mut env = events::envelope(name, &device.jid().unwrap_or_default(), payload);
                 add_session_id(device, &mut env);
-                webhook.send(name, env);
+                webhook.send(name, env, &device.webhook());
             }
         }
         Event::Receipt(r) => {
-            if !webhook.is_enabled() {
-                return;
-            }
             let view = ReceiptView {
                 chat: r.source.chat.clone(),
                 sender: r.source.sender.clone(),
@@ -171,7 +162,7 @@ async fn handle(device: &Arc<DeviceInstance>, event: &Event, webhook: &Dispatche
             let mut env =
                 events::receipt_envelope(&resolver, &view, &device.jid().unwrap_or_default()).await;
             add_session_id(device, &mut env);
-            webhook.send(events::MESSAGE_ACK, env);
+            webhook.send(events::MESSAGE_ACK, env, &device.webhook());
         }
         _ => {}
     }
@@ -223,13 +214,6 @@ async fn remember(device: &DeviceInstance, r: &ClientResolver, m: &IncomingMessa
             text: text.to_owned(),
         },
     );
-}
-
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or_default()
 }
 
 /// `Resolver` backed by a live client's LID store and identity.

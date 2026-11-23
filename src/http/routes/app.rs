@@ -47,7 +47,7 @@ async fn info(State(state): State<AppState>) -> Response {
 
 /// `scheme://host{base}/{path}`, honouring `X-Forwarded-*` like Fiber with
 /// `TrustProxy`.
-fn public_url(headers: &HeaderMap, base: &str, path: &str) -> String {
+pub(crate) fn public_url(headers: &HeaderMap, base: &str, path: &str) -> String {
     let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
     let scheme = get("x-forwarded-proto").unwrap_or("http");
     let host = get("x-forwarded-host")

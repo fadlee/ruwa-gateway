@@ -14,6 +14,10 @@ use ruwa_gateway::{
     config::Credential,
     device::{DeviceManager, DeviceOptions},
     http::{AppState, Settings, router},
+    storage::{
+        Db,
+        registry::{DeviceRecord, Registry},
+    },
     webhook::{Dispatcher, WebhookConfig},
 };
 use serde_json::Value;
@@ -28,8 +32,12 @@ struct Harness {
 async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Harness {
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("storages/devices");
-    for slot in slots {
-        std::fs::create_dir_all(root.join(slot)).unwrap();
+    let registry = Registry::new(Db::open(&dir.path().join("ruwa.db").to_string_lossy()).unwrap());
+    for (i, slot) in slots.iter().enumerate() {
+        registry
+            .insert(DeviceRecord::new(slot, slot, i as i64))
+            .await
+            .unwrap();
     }
     let qr_dir = dir.path().join("statics/qrcode");
     let devices = DeviceManager::bootstrap(
@@ -38,6 +46,7 @@ async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Har
             qr_dir: qr_dir.clone(),
             os: "Chrome".into(),
         },
+        registry,
         Dispatcher::new(WebhookConfig::default()).unwrap(),
     )
     .await
@@ -274,4 +283,145 @@ async fn logout_keeps_slot() {
     assert_eq!(body["message"], "Success logout");
     let (_, body) = call(&h.app, get("/app/devices")).await;
     assert_eq!(body["results"].as_array().unwrap().len(), 1);
+}
+
+fn req(method: &str, uri: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn devices_crud() {
+    let h = harness().await;
+    let (_, body) = call(&h.app, get("/devices")).await;
+    assert_eq!(body["message"], "List devices");
+    assert_eq!(body["results"][0]["id"], "default");
+    assert_eq!(body["results"][0]["state"], "disconnected");
+    assert!(body["results"][0].get("jid").is_none(), "jid is omitempty");
+
+    let (status, body) = call(&h.app, req("POST", "/devices", r#"{"device_id":"sales"}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["message"], "Device added");
+    assert_eq!(body["results"]["id"], "sales");
+    assert!(body["results"].get("webhook_url").is_none());
+
+    let (status, body) = call(&h.app, req("POST", "/devices", r#"{"device_id":"sales"}"#)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["message"], "device sales already exists");
+
+    let (_, body) = call(&h.app, req("POST", "/devices", "{}")).await;
+    let generated = body["results"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(generated.len(), 36, "uuid id");
+
+    let (_, body) = call(&h.app, get("/devices/sales")).await;
+    assert_eq!(body["message"], "Device info");
+    assert_eq!(body["results"]["id"], "sales");
+
+    let (_, body) = call(&h.app, get("/devices/sales/status")).await;
+    assert_eq!(
+        body["results"],
+        serde_json::json!({"device_id":"sales","is_connected":false,"is_logged_in":false})
+    );
+
+    // With three slots, device-scoped routes need an id.
+    assert_eq!(
+        call(&h.app, get("/app/status")).await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let (status, body) = call(&h.app, req("DELETE", "/devices/sales", "")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["message"], "Device removed");
+    assert!(body.get("results").is_none());
+
+    let (status, body) = call(&h.app, req("DELETE", "/devices/sales", "")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["message"], "device not found");
+
+    let (status, body) = call(&h.app, get("/devices/sales")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["message"], "device sales not found");
+}
+
+#[tokio::test]
+async fn devices_add_with_webhook_and_bad_body() {
+    let h = harness().await;
+    let (_, body) = call(
+        &h.app,
+        req(
+            "POST",
+            "/devices",
+            r#"{"device_id":"a","webhook_url":"https://x","webhook_events":"message"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(body["results"]["webhook_url"], "https://x");
+    assert_eq!(body["results"]["webhook_secret"], "");
+    assert_eq!(body["results"]["webhook_insecure_skip_verify"], false);
+
+    let (status, body) = call(&h.app, req("POST", "/devices", "{nope")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "BAD_REQUEST");
+    assert_eq!(body["message"], "Invalid request body");
+}
+
+#[tokio::test]
+async fn device_webhook_roundtrip() {
+    let h = harness().await;
+    let (status, body) = call(&h.app, req("PATCH", "/devices/default/webhook", "{}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["message"], "webhook_url is required");
+
+    let (status, body) = call(
+        &h.app,
+        req(
+            "PATCH",
+            "/devices/default/webhook",
+            r#"{"webhook_url":"https://h","webhook_secret":"s"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["message"], "Device webhook updated");
+
+    let (_, body) = call(&h.app, get("/devices/default/webhook")).await;
+    assert_eq!(body["message"], "Device webhook retrieved");
+    assert_eq!(body["results"]["webhook_url"], "https://h");
+    assert_eq!(body["results"]["webhook_secret"], "s");
+    assert_eq!(body["results"]["webhook_events"], "");
+
+    let (status, _) = call(&h.app, get("/devices/missing/webhook")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn device_ids_with_path_characters_are_contained() {
+    let h = harness().await;
+    let (status, body) = call(
+        &h.app,
+        req("POST", "/devices", r#"{"device_id":"../escape"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["results"]["id"], "../escape");
+    let (status, _) = call(&h.app, get("/devices/..%2Fescape")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn device_reconnect_and_logout_messages() {
+    let h = harness().await;
+    let (status, body) = call(&h.app, req("POST", "/devices/default/reconnect", "")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        body["message"],
+        "device default is not logged in (session deleted)"
+    );
+    let (status, body) = call(&h.app, req("POST", "/devices/default/logout", "")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["message"], "Logout requested");
 }

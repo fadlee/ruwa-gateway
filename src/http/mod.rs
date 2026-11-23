@@ -63,6 +63,7 @@ pub fn router(state: AppState) -> Router {
 
     let authed = Router::new()
         .merge(routes::app::unscoped())
+        .merge(routes::devices::router())
         .merge(scoped)
         .layer(middleware::from_fn_with_state(
             state.clone(),

@@ -16,6 +16,7 @@ use super::{
     processor::{Job, Relay},
     recent::{RecentMessage, RecentMessages},
 };
+use crate::storage::registry::{DeviceRecord, DeviceWebhook, Registry};
 use crate::wa::sdk::{
     self,
     pair_code::PairCodeOptions,
@@ -24,7 +25,6 @@ use crate::wa::sdk::{
 };
 
 const SESSION_DB: &str = "session.db";
-const JID_MARKER: &str = "jid";
 const STORE_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
@@ -42,6 +42,9 @@ pub enum PairCode {
 pub struct DeviceInstance {
     id: String,
     dir: PathBuf,
+    created_at: i64,
+    registry: Registry,
+    webhook: StdRwLock<DeviceWebhook>,
     handle: Mutex<Option<BotHandle>>,
     client: StdRwLock<Option<Arc<Client>>>,
     jid: StdRwLock<Option<String>>,
@@ -56,14 +59,14 @@ pub struct DeviceInstance {
 }
 
 impl DeviceInstance {
-    pub(super) fn new(id: &str, dir: PathBuf) -> Self {
-        let jid = std::fs::read_to_string(dir.join(JID_MARKER))
-            .ok()
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty());
+    pub(super) fn new(record: &DeviceRecord, dir: PathBuf, registry: Registry) -> Self {
+        let jid = Some(record.jid.clone()).filter(|j| !j.is_empty());
         Self {
-            id: id.to_owned(),
+            id: record.device_id.clone(),
             dir,
+            created_at: record.created_at,
+            registry,
+            webhook: StdRwLock::new(record.webhook()),
             handle: Mutex::new(None),
             client: StdRwLock::new(None),
             jid: StdRwLock::new(jid),
@@ -77,6 +80,27 @@ impl DeviceInstance {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Unix seconds.
+    pub fn created_at(&self) -> i64 {
+        self.created_at
+    }
+
+    pub fn webhook(&self) -> DeviceWebhook {
+        self.webhook.read().expect("webhook lock").clone()
+    }
+
+    pub async fn set_webhook(&self, hook: DeviceWebhook) -> anyhow::Result<()> {
+        self.registry
+            .set_webhook(&self.id, hook.clone(), super::now())
+            .await?;
+        *self.webhook.write().expect("webhook lock") = hook;
+        Ok(())
     }
 
     /// Account JID (`628...@s.whatsapp.net`), once paired.
@@ -112,19 +136,26 @@ impl DeviceInstance {
             .unwrap_or_default()
     }
 
-    pub(super) fn set_jid(&self, jid: Option<String>) {
-        match &jid {
-            Some(j) => {
-                let _ = std::fs::create_dir_all(&self.dir);
-                if let Err(error) = std::fs::write(self.dir.join(JID_MARKER), j) {
-                    tracing::warn!(device = %self.id, %error, "could not write jid marker");
-                }
-            }
-            None => {
-                let _ = std::fs::remove_file(self.dir.join(JID_MARKER));
-            }
+    /// Record the paired account (or clear it) in memory and the registry.
+    pub(super) async fn set_jid(&self, jid: Option<String>) {
+        *self.jid.write().expect("jid lock") = jid.clone();
+        let name = if jid.is_some() {
+            self.display_name()
+        } else {
+            String::new()
+        };
+        if let Err(error) = self
+            .registry
+            .set_identity(
+                &self.id,
+                jid.as_deref().unwrap_or_default(),
+                &name,
+                super::now(),
+            )
+            .await
+        {
+            tracing::warn!(device = %self.id, %error, "could not persist device identity");
         }
-        *self.jid.write().expect("jid lock") = jid;
     }
 
     pub fn remember(&self, id: String, message: RecentMessage) {
@@ -185,7 +216,7 @@ impl DeviceInstance {
     pub async fn wipe_session(&self) {
         self.stop().await;
         remove_session_files(&self.dir.join(SESSION_DB));
-        self.set_jid(None);
+        self.set_jid(None).await;
         self.qr.send_replace(None);
         self.pair.send_replace(None);
     }

@@ -7,6 +7,7 @@ use crate::{
     config::Config,
     device::{DeviceManager, DeviceOptions},
     http::{self, AppState, Settings},
+    storage::{Db, registry::Registry},
     webhook::{Dispatcher, WebhookConfig},
 };
 
@@ -20,12 +21,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         ignore_jids: non_empty(&cfg.webhook_ignore_jids),
         insecure_skip_verify: cfg.webhook_insecure_skip_verify,
     })?;
+    let db = Db::open(&cfg.db_uri)?;
     let devices = DeviceManager::bootstrap(
         DeviceOptions {
             root: PathBuf::from("storages/devices"),
             qr_dir: PathBuf::from("statics/qrcode"),
             os: cfg.os.clone(),
         },
+        Registry::new(db),
         webhook,
     )
     .await?;

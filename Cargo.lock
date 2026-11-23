@@ -2006,6 +2006,8 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "diesel",
+ "diesel_migrations",
  "hex",
  "hmac",
  "http-body-util",

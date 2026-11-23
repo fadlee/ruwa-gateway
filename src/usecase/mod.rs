@@ -2,4 +2,5 @@
 //! message building). HTTP handlers stay thin and call into here.
 
 pub mod app;
+pub mod device;
 pub mod send;

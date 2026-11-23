@@ -7,6 +7,7 @@
 //! device ids are arbitrary strings. Only slots with a recorded JID reconnect
 //! at startup, so an unpaired slot never starts emitting QR codes on its own.
 
+pub mod hub;
 mod instance;
 mod processor;
 mod recent;
@@ -50,6 +51,7 @@ pub struct DeviceManager {
     registry: Registry,
     devices: RwLock<BTreeMap<String, Arc<DeviceInstance>>>,
     events: mpsc::UnboundedSender<processor::Job>,
+    hub: hub::Hub,
 }
 
 pub(crate) fn now() -> i64 {
@@ -95,6 +97,7 @@ impl DeviceManager {
             registry,
             devices: RwLock::new(BTreeMap::new()),
             events: tx,
+            hub: hub::Hub::default(),
         });
         tokio::spawn(processor::run(
             rx,
@@ -103,6 +106,7 @@ impl DeviceManager {
                 dir: manager.opts.media_dir.clone(),
                 auto_download: manager.opts.auto_download_media,
             },
+            manager.hub.clone(),
         ));
 
         let mut records = manager.registry.all().await?;
@@ -131,6 +135,11 @@ impl DeviceManager {
             .await
             .insert(record.device_id.clone(), instance.clone());
         instance
+    }
+
+    /// Dashboard event hub (`/ws`).
+    pub fn hub(&self) -> &hub::Hub {
+        &self.hub
     }
 
     pub fn options(&self) -> &DeviceOptions {

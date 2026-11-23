@@ -39,6 +39,16 @@ fn bad_request(message: &str) -> ApiError {
     ApiError::new(StatusCode::BAD_REQUEST, "BAD_REQUEST", message)
 }
 
+async fn views(state: &AppState) -> Vec<dev::DeviceView> {
+    state
+        .devices
+        .list()
+        .await
+        .iter()
+        .map(|d| dev::view(d))
+        .collect()
+}
+
 async fn list(State(state): State<AppState>) -> Response {
     let devices: Vec<_> = state
         .devices
@@ -116,6 +126,11 @@ async fn remove(State(state): State<AppState>, Path(id): Path<String>) -> ApiRes
     let id = id.trim();
     dev::validate_id(id)?;
     state.devices.remove(id).await?;
+    state.devices.hub().publish(
+        "DEVICE_REMOVED",
+        format!("Device {id} removed"),
+        json!({ "device_id": id, "devices": views(&state).await }),
+    );
     Ok(response::success("Device removed", Value::Null))
 }
 
@@ -165,7 +180,15 @@ async fn logout(State(state): State<AppState>, Path(id): Path<String>) -> ApiRes
         .find(id)
         .await
         .ok_or_else(|| ApiError::internal(format!("device {id} not found")))?;
-    usecase::app::logout(&device).await?;
+    {
+        let _guard = device.login_lock.lock().await;
+        device.logout().await;
+    }
+    state.devices.hub().publish(
+        "DEVICE_LOGGED_OUT",
+        format!("Device {id} logged out (slot kept)"),
+        json!({ "device_id": id, "devices": views(&state).await }),
+    );
     Ok(response::success("Logout requested", Value::Null))
 }
 
@@ -222,6 +245,11 @@ async fn update_webhook(
         .set_webhook(hook)
         .await
         .map_err(|e| ApiError::internal(format!("failed to set device webhook config: {e}")))?;
+    state.devices.hub().publish(
+        "DEVICE_WEBHOOK_CONFIG_UPDATED",
+        format!("Device {id} webhook config updated"),
+        json!({ "device_id": id }),
+    );
     Ok(response::success(
         "Device webhook updated",
         json!({

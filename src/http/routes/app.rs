@@ -93,8 +93,11 @@ async fn login_with_code(
     ))
 }
 
-async fn logout(Extension(Device(device)): Extension<Device>) -> ApiResult<Response> {
-    usecase::app::logout(&device).await?;
+async fn logout(
+    State(state): State<AppState>,
+    Extension(Device(device)): Extension<Device>,
+) -> ApiResult<Response> {
+    usecase::app::logout(&state.devices, &device).await?;
     Ok(response::success(
         "Success logout",
         json!({ "device_id": device.id() }),
@@ -113,20 +116,10 @@ async fn reconnect(
 }
 
 async fn devices(State(state): State<AppState>) -> Response {
-    let list: Vec<_> = state
-        .devices
-        .list()
-        .await
-        .iter()
-        .map(|d| {
-            json!({
-                "name": d.display_name(),
-                "device": d.id(),
-                "jid": d.jid().unwrap_or_default(),
-            })
-        })
-        .collect();
-    response::success("Fetch device success", list)
+    response::success(
+        "Fetch device success",
+        usecase::app::device_list(&state.devices).await,
+    )
 }
 
 async fn status(Extension(Device(device)): Extension<Device>) -> Response {

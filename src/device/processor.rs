@@ -9,6 +9,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::{
+    hub::Hub,
     instance::{DeviceInstance, PairCode, QrCode},
     recent::RecentMessage,
 };
@@ -52,6 +53,7 @@ const KINDS: &[EventKind] = &[
     EventKind::Receipt,
     EventKind::ChatPresence,
     EventKind::TemporaryBan,
+    EventKind::StreamReplaced,
 ];
 
 impl EventHandler for Relay {
@@ -76,9 +78,10 @@ pub(super) async fn run(
     mut rx: mpsc::UnboundedReceiver<Job>,
     webhook: Dispatcher,
     media: MediaSettings,
+    hub: Hub,
 ) {
     while let Some(Job { device, event }) = rx.recv().await {
-        handle(&device, &event, &webhook, &media).await;
+        handle(&device, &event, &webhook, &media, &hub).await;
     }
 }
 
@@ -87,6 +90,7 @@ async fn handle(
     event: &Event,
     webhook: &Dispatcher,
     media: &MediaSettings,
+    hub: &Hub,
 ) {
     match event {
         Event::PairingQrCode(qr) => {
@@ -117,6 +121,11 @@ async fn handle(
         Event::PairSuccess(ok) => {
             tracing::info!(device = %device.id(), jid = %ok.id, "paired");
             device.set_jid(Some(ok.id.to_non_ad().to_string())).await;
+            hub.publish(
+                "LOGIN_SUCCESS",
+                format!("Successfully pair with {}", ok.id),
+                serde_json::Value::Null,
+            );
         }
         Event::PairError(e) => {
             tracing::warn!(device = %device.id(), error = %e.error, "pairing failed");
@@ -146,6 +155,15 @@ async fn handle(
                 super::now(),
             );
             webhook.send(events::DEVICE_LOGGED_OUT, env, &device.webhook());
+            let code = out.reason.code();
+            hub.publish(
+                "DEVICE_LOGGED_OUT",
+                "Device logged out (slot kept)",
+                serde_json::json!({
+                    "device_id": device.id(),
+                    "reason": format!("{code}: {}", events::connect_failure_reason(code)),
+                }),
+            );
             let device = device.clone();
             tokio::spawn(async move { device.wipe_session().await });
         }
@@ -225,7 +243,27 @@ async fn handle(
                 ),
                 super::now(),
             );
+            let payload = env.get("payload").cloned().unwrap_or_default();
             webhook.send(events::DEVICE_TEMPORARY_BAN, env, &device.webhook());
+            let mut result = payload;
+            result["device_id"] = device.id().into();
+            hub.publish(
+                "DEVICE_TEMPORARY_BAN",
+                format!(
+                    "{}: {}",
+                    ban.code.code(),
+                    events::temp_ban_reason(ban.code.code())
+                ),
+                result,
+            );
+        }
+        Event::StreamReplaced(_) => {
+            tracing::warn!(device = %device.id(), "stream replaced by another client");
+            hub.publish(
+                "DEVICE_STREAM_REPLACED",
+                "Device connection was replaced by another client using the same session",
+                serde_json::json!({ "device_id": device.id() }),
+            );
         }
         _ => {}
     }

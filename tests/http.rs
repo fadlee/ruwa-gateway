@@ -594,3 +594,92 @@ async fn dashboard_falls_back_when_not_downloaded() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("not available yet"));
 }
+
+mod websocket {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    use super::*;
+
+    async fn serve(h: &Harness) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = h.app.clone();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    async fn next_json<S>(ws: &mut S) -> Value
+    where
+        S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+            + Unpin,
+    {
+        loop {
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+                .await
+                .expect("ws message in time")
+                .unwrap()
+                .unwrap();
+            if let Message::Text(t) = msg {
+                return serde_json::from_str(&t).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_devices_and_device_events() {
+        let h = harness_with(cred(), "", &[]).await;
+        let addr = serve(&h).await;
+        let auth = STANDARD.encode("u:p");
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/ws?device_id=default&authorization={auth}"
+        ))
+        .await
+        .unwrap();
+
+        ws.send(Message::Text(r#"{"code":"FETCH_DEVICES"}"#.into()))
+            .await
+            .unwrap();
+        let ev = next_json(&mut ws).await;
+        assert_eq!(ev["code"], "LIST_DEVICES");
+        assert_eq!(ev["message"], "Device found");
+        assert_eq!(ev["result"][0]["device"], "default");
+
+        let (status, _) = call(
+            &h.app,
+            authed(req("POST", "/devices", r#"{"device_id":"b"}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = call(&h.app, authed(req("DELETE", "/devices/b", ""))).await;
+        assert_eq!(status, StatusCode::OK);
+        let ev = next_json(&mut ws).await;
+        assert_eq!(ev["code"], "DEVICE_REMOVED");
+        assert_eq!(ev["result"]["device_id"], "b");
+        assert_eq!(ev["result"]["devices"].as_array().unwrap().len(), 1);
+
+        let (status, _) = call(&h.app, authed(get("/app/logout"))).await;
+        assert_eq!(status, StatusCode::OK);
+        let ev = next_json(&mut ws).await;
+        assert_eq!(ev["code"], "DEVICE_LOGGED_OUT");
+        assert_eq!(ev["message"], "Device default logged out (slot kept)");
+    }
+
+    #[tokio::test]
+    async fn requires_auth_and_upgrade() {
+        let h = harness_with(cred(), "", &[]).await;
+        let addr = serve(&h).await;
+        assert!(
+            tokio_tungstenite::connect_async(format!("ws://{addr}/ws?device_id=default"))
+                .await
+                .is_err()
+        );
+        let auth = STANDARD.encode("u:p");
+        let (status, _) = raw(
+            &h.app,
+            get(&format!("/ws?device_id=default&authorization={auth}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UPGRADE_REQUIRED);
+    }
+}

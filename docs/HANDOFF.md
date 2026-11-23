@@ -22,7 +22,7 @@
 1. **Uji manual M1+M2 lewat gowa-ui** (paling mudah): `APP_HOST=127.0.0.1 cargo run -- rest` dari direktori kerja
    terpisah, buka `http://localhost:3000/` → kartu device → **Pair** → scan QR dari HP. Lalu menu **Messaging**
    untuk kirim teks/gambar/file/audio/video/kontak/lokasi/link, **Add device** untuk multi-device.
-   Halaman Chats/Groups/Channels/sebagian Account akan error (endpoint Fase 3–4); titik status oranye = `/ws` belum ada.
+   Halaman Chats/Groups/Channels/sebagian Account akan error (endpoint Fase 3–4). **User sudah berhasil pair 2 akun dan kirim pesan lewat UI (2026-11-23).**
    Alternatif lewat curl (butuh HP dengan akun test):
    ```sh
    # terminal 1: penerima webhook (atau https://webhook.site)
@@ -63,6 +63,7 @@
 | 2026-11-23 | Request body media **tanpa** `#[serde(flatten)]` | flatten membuat form/multipart gagal parse angka/bool (`duration`, `is_forwarded`) — ada test |
 | 2026-11-23 | Fetch URL dari user menolak IP non-publik di tiap hop redirect | setara `newUntrustedHTTPClient` GOWA; cegah SSRF |
 | 2026-11-23 | gowa-ui disajikan di `{base}/` (di balik basic auth), diunduh dari release GitHub terbaru saat start, diverifikasi digest SHA-256, cache `storages/ui/index.html` (fitur M4 ditarik maju) | sarana uji manual; sama dengan GOWA v9 (`APP_UI_*`) |
+| 2026-11-23 | `/ws` = hub broadcast global (tokio `broadcast`, kapasitas 64; klien lambat diputus) | sama dengan GOWA: tidak di-scope per device; integrasi pakai webhook |
 | 2026-11-23 | `compress` gambar default `true` (JSON tanpa field / multipart), video default `false` | GOWA preset `Compress = true` hanya di handler image |
 
 ## Catatan / jebakan
@@ -97,6 +98,14 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-23 — WebSocket `/ws`
+- `device/hub.rs` + `http/routes/ws.rs`: `{code,message,result}`; `FETCH_DEVICES` → `LIST_DEVICES`; event `LOGIN_SUCCESS`,
+  `DEVICE_LOGGED_OUT` (lokal & remote), `DEVICE_REMOVED`, `DEVICE_TEMPORARY_BAN`, `DEVICE_STREAM_REPLACED`,
+  `DEVICE_WEBHOOK_CONFIG_UPDATED`. Belum: `PASSKEY_*`, `DEVICE_REACHOUT_TIMELOCK`, cek origin browser (`CROSS_SITE_REQUEST_BLOCKED`).
+- Test integrasi WS dengan server + tokio-tungstenite. Diverifikasi di headless Chrome: indikator live updates hijau.
+- Uji manual user: pair 2 akun + kirim pesan via gowa-ui berhasil.
+- Catatan: disk sempat penuh di tengah sesi (build gagal); sudah dibereskan user.
 
 ### 2026-11-23 — gowa-ui
 - `src/ui.rs`: unduh `gowa-ui.html` (release latest `aldinokemal/gowa-ui`, cek digest), cache, sajikan di `/`; fallback HTML bila belum ada.

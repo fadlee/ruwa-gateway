@@ -144,10 +144,33 @@ pub async fn login_with_code(
     }
 }
 
-pub async fn logout(device: &Arc<DeviceInstance>) -> ApiResult<()> {
-    let _guard = device.login_lock.lock().await;
-    device.logout().await;
+pub async fn logout(manager: &DeviceManager, device: &Arc<DeviceInstance>) -> ApiResult<()> {
+    {
+        let _guard = device.login_lock.lock().await;
+        device.logout().await;
+    }
+    manager.hub().publish(
+        "DEVICE_LOGGED_OUT",
+        format!("Device {} logged out (slot kept)", device.id()),
+        serde_json::json!({ "device_id": device.id(), "devices": device_list(manager).await }),
+    );
     Ok(())
+}
+
+/// GOWA `FetchDevices`: `[{name, device, jid}]` (`/app/devices`, `LIST_DEVICES`).
+pub async fn device_list(manager: &DeviceManager) -> serde_json::Value {
+    manager
+        .list()
+        .await
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "name": d.display_name(),
+                "device": d.id(),
+                "jid": d.jid().unwrap_or_default(),
+            })
+        })
+        .collect()
 }
 
 pub async fn reconnect(manager: &DeviceManager, device: &Arc<DeviceInstance>) -> ApiResult<()> {

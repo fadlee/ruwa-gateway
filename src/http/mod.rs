@@ -58,6 +58,7 @@ pub fn router(state: AppState) -> Router {
     let scoped = routes::app::scoped()
         .merge(routes::send::router())
         .merge(routes::user::router())
+        .merge(routes::ws::router())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             device_scope::resolve,

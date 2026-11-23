@@ -811,3 +811,215 @@ mod form_tests {
         assert_eq!(r.mentions, vec!["1", "2"]);
     }
 }
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct PresenceRequest {
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+/// `POST /send/presence` (GOWA `SendPresence`).
+pub async fn send_presence(
+    device: &DeviceInstance,
+    req: PresenceRequest,
+) -> ApiResult<SendResponse> {
+    if !matches!(req.kind.as_str(), "available" | "unavailable") {
+        super::chat::ozzo([("type", "must be a valid value".to_owned())].into())?;
+    }
+    let client = must_login(device)?;
+    let result = if req.kind == "available" {
+        client.presence().set_available().await
+    } else {
+        client.presence().set_unavailable().await
+    };
+    result.map_err(ApiError::internal)?;
+    Ok(SendResponse {
+        message_id: "presence".into(),
+        status: format!("Send presence success {}", req.kind),
+    })
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ChatPresenceRequest {
+    pub phone: String,
+    pub action: String,
+}
+
+/// `POST /send/chat-presence` (GOWA `SendChatPresence`): typing indicator.
+pub async fn send_chat_presence(
+    device: &DeviceInstance,
+    mut req: ChatPresenceRequest,
+    settings: SendSettings,
+) -> ApiResult<SendResponse> {
+    req.phone = jid::sanitize_phone(&req.phone);
+    required(&[("phone", &req.phone), ("action", &req.action)])?;
+    if !matches!(req.action.as_str(), "start" | "stop") {
+        super::chat::ozzo([("action", "must be a valid value".to_owned())].into())?;
+    }
+    validate_phone_number(&req.phone)?;
+    let (client, recipient) = prologue(device, &req.phone, settings).await?;
+    let (message_id, verb) = if req.action == "start" {
+        client
+            .chatstate()
+            .send_composing(&recipient)
+            .await
+            .map_err(ApiError::internal)?;
+        ("chat-presence-start", "start")
+    } else {
+        client
+            .chatstate()
+            .send_paused(&recipient)
+            .await
+            .map_err(ApiError::internal)?;
+        ("chat-presence-stop", "stop")
+    };
+    Ok(SendResponse {
+        message_id: message_id.into(),
+        status: format!("Send chat presence {verb} typing success {}", req.phone),
+    })
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct StickerRequest {
+    pub phone: String,
+    pub duration: Option<i64>,
+    pub is_forwarded: bool,
+    pub reply_message_id: Option<String>,
+    pub sticker_url: Option<String>,
+}
+
+/// GOWA animated-sticker limit.
+const ANIMATED_STICKER_MAX: usize = 500 * 1024;
+
+/// `POST /send/sticker` (GOWA `SendSticker`).
+pub async fn send_sticker(
+    device: &DeviceInstance,
+    mut req: StickerRequest,
+    file: Option<Upload>,
+    settings: SendSettings,
+) -> ApiResult<SendResponse> {
+    req.phone = jid::sanitize_phone(&req.phone);
+    required(&[("phone", &req.phone)])?;
+    validate_phone_number(&req.phone)?;
+    let has_url = req.sticker_url.as_deref().is_some_and(|u| !u.is_empty());
+    if file.is_none() && !has_url {
+        return Err(ApiError::validation(
+            "either Sticker or StickerURL must be provided",
+        ));
+    }
+    if file.is_some() && has_url {
+        return Err(ApiError::validation(
+            "cannot provide both Sticker file and StickerURL",
+        ));
+    }
+    if let Some(f) = &file
+        && !matches!(
+            f.content_type.as_str(),
+            "image/jpeg" | "image/jpg" | "image/png" | "image/webp" | "image/gif"
+        )
+    {
+        return Err(ApiError::validation(
+            "your sticker is not allowed. please use jpg/jpeg/png/webp/gif",
+        ));
+    }
+    if has_url && !is_url(req.sticker_url.as_deref().unwrap_or_default()) {
+        return Err(ApiError::validation("StickerURL must be a valid URL"));
+    }
+    validate_duration(req.duration)?;
+
+    let (client, recipient) = prologue(device, &req.phone, settings).await?;
+    let raw = source(
+        file,
+        req.sticker_url.as_deref(),
+        media::MAX_IMAGE_SIZE,
+        "sticker",
+    )
+    .await?;
+
+    let (webp, width, height, animated) = match media::image::webp_info(&raw.bytes) {
+        Some((true, w, h)) => {
+            if w != 512 || h != 512 {
+                return Err(ApiError::validation(format!(
+                    "animated WebP stickers must be exactly 512x512 pixels (got {w}x{h}). Please resize your sticker before uploading."
+                )));
+            }
+            if raw.bytes.len() > ANIMATED_STICKER_MAX {
+                return Err(ApiError::validation(format!(
+                    "animated WebP stickers must be under 500KB (got {} KB). Please reduce the file size.",
+                    raw.bytes.len() / 1024
+                )));
+            }
+            (raw.bytes, w, h, true)
+        }
+        _ => {
+            let (png, w, h) =
+                tokio::task::spawn_blocking(move || media::image::sticker_png(&raw.bytes))
+                    .await
+                    .map_err(ApiError::internal)?
+                    .map_err(|e| {
+                        ApiError::internal(format!(
+                            "failed to open image for sticker conversion: {e}"
+                        ))
+                    })?;
+            let webp = if ffmpeg::available() {
+                ffmpeg::png_to_webp(&png).await.map_err(|e| {
+                    ApiError::internal(format!("failed to convert sticker to WebP: {e}"))
+                })?
+            } else {
+                media::image::png_to_webp_lossless(&png).map_err(|e| {
+                    ApiError::internal(format!("failed to convert sticker to WebP: {e}"))
+                })?
+            };
+            (webp, w, h, false)
+        }
+    };
+
+    let mut ci = base_context(req.is_forwarded, req.duration);
+    if req.is_forwarded {
+        ci.forwarding_score = Some(100);
+    }
+    merge_reply(device, &mut ci, req.reply_message_id.as_deref(), &recipient).await;
+
+    let uploaded = upload(&client, webp, MediaType::Image).await?;
+    let mut sticker = proto::message::StickerMessage::default();
+    sticker.url = Some(uploaded.url);
+    sticker.direct_path = Some(uploaded.direct_path);
+    sticker.mimetype = Some("image/webp".into());
+    sticker.file_length = Some(uploaded.file_length);
+    sticker.file_sha256 = Some(uploaded.file_sha256.to_vec());
+    sticker.file_enc_sha256 = Some(uploaded.file_enc_sha256.to_vec());
+    sticker.media_key = Some(uploaded.media_key.to_vec());
+    sticker.media_key_timestamp = Some(uploaded.media_key_timestamp);
+    sticker.width = Some(width);
+    sticker.height = Some(height);
+    sticker.is_animated = Some(animated);
+    if ci != proto::ContextInfo::default() {
+        sticker.context_info = sdk::waproto::buffa::MessageField::some(ci);
+    }
+    let mut message = proto::Message::default();
+    message.sticker_message = sdk::waproto::buffa::MessageField::some(sticker);
+
+    let label = if animated {
+        "🎨 Animated Sticker"
+    } else {
+        "🎨 Sticker"
+    };
+    let message_id = deliver(device, &client, &recipient, message, label).await?;
+    let status = if animated {
+        format!(
+            "Animated sticker sent to {} (server timestamp: {})",
+            req.phone,
+            server_time()
+        )
+    } else {
+        format!(
+            "Sticker sent to {} (server timestamp: {})",
+            req.phone,
+            server_time()
+        )
+    };
+    Ok(SendResponse { message_id, status })
+}

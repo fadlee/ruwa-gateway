@@ -170,6 +170,53 @@ pub fn thumbnail_of(bytes: &[u8]) -> Option<Vec<u8>> {
     decode(bytes).ok().and_then(|(img, _)| thumbnail(&img).ok())
 }
 
+/// GOWA `stickerMaxEdge`.
+pub const STICKER_EDGE: u32 = 512;
+
+/// `(animated, width, height)` of a WebP container, read from its header
+/// (GOWA `getWebPInfo`, which shells out to `webpmux -info`).
+pub fn webp_info(bytes: &[u8]) -> Option<(bool, u32, u32)> {
+    if bytes.len() < 30 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return None;
+    }
+    let le24 = |b: &[u8]| u32::from(b[0]) | u32::from(b[1]) << 8 | u32::from(b[2]) << 16;
+    match &bytes[12..16] {
+        // Extended format: flags byte (bit 1 = animation), canvas size - 1.
+        b"VP8X" => Some((
+            bytes[20] & 0x02 != 0,
+            le24(&bytes[24..27]) + 1,
+            le24(&bytes[27..30]) + 1,
+        )),
+        // Lossless: signature 0x2f, then 14-bit width-1 / height-1.
+        b"VP8L" if bytes[20] == 0x2f => {
+            let bits = u32::from_le_bytes([bytes[21], bytes[22], bytes[23], bytes[24]]);
+            Some((false, (bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+        }
+        // Lossy: 3 byte frame tag, start code 9d 01 2a, 14-bit sizes.
+        b"VP8 " if bytes[23..26] == [0x9d, 0x01, 0x2a] => Some((
+            false,
+            u32::from(u16::from_le_bytes([bytes[26], bytes[27]]) & 0x3fff),
+            u32::from(u16::from_le_bytes([bytes[28], bytes[29]]) & 0x3fff),
+        )),
+        _ => None,
+    }
+}
+
+/// Decode (first frame of a GIF), fit inside 512x512 and return the PNG that
+/// is then converted to WebP, with the fitted size.
+pub fn sticker_png(bytes: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    let (img, _) = decode(bytes)?;
+    let fitted = fit_box(&img, STICKER_EDGE, STICKER_EDGE);
+    let (w, h) = fitted.dimensions();
+    Ok((encode(&fitted, ImageFormat::Png)?, w, h))
+}
+
+/// Lossless WebP without ffmpeg (larger than GOWA's lossy q60 output).
+pub fn png_to_webp_lossless(png: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let img = image::load_from_memory_with_format(png, ImageFormat::Png)?;
+    encode(&img, ImageFormat::WebP)
+}
+
 #[cfg(test)]
 pub(crate) fn sample_png(w: u32, h: u32) -> Vec<u8> {
     let img = DynamicImage::new_rgba8(w, h);
@@ -241,5 +288,30 @@ mod tests {
     #[test]
     fn garbage_is_an_error() {
         assert!(prepare(b"not an image".to_vec(), true, false).is_err());
+    }
+    #[test]
+    fn webp_header_info() {
+        // Static: our own lossless encoder output.
+        let png = sample_png(40, 30);
+        let webp = png_to_webp_lossless(&png).unwrap();
+        assert_eq!(webp_info(&webp), Some((false, 40, 30)));
+
+        // Extended header with the animation flag, canvas 512x512.
+        let mut anim = Vec::new();
+        anim.extend_from_slice(b"RIFF\x00\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00");
+        anim.extend_from_slice(&[0x02, 0, 0, 0, 0xff, 0x01, 0, 0xff, 0x01, 0]);
+        assert_eq!(webp_info(&anim), Some((true, 512, 512)));
+
+        assert_eq!(webp_info(b"not a webp file at all, definitely"), None);
+        assert_eq!(webp_info(&png), None);
+    }
+
+    #[test]
+    fn sticker_png_fits_512() {
+        let (png, w, h) = sticker_png(&sample_png(1024, 256)).unwrap();
+        assert_eq!((w, h), (512, 128));
+        assert!(!png.is_empty());
+        let (_, w, h) = sticker_png(&sample_png(100, 80)).unwrap();
+        assert_eq!((w, h), (100, 80));
     }
 }

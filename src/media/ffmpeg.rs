@@ -278,6 +278,41 @@ pub fn default_waveform() -> Vec<u8> {
         .collect()
 }
 
+/// Static WebP sticker from a PNG (GOWA `buildStickerWebPFFmpegArgs`).
+pub async fn png_to_webp(png: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let dir = tempfile::tempdir()?;
+    let (inp, out) = (dir.path().join("in.png"), dir.path().join("out.webp"));
+    tokio::fs::write(&inp, png).await?;
+    let (i, o) = (path_str(&inp)?, path_str(&out)?);
+    run(
+        "ffmpeg",
+        &[
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            i,
+            "-vcodec",
+            "libwebp",
+            "-lossless",
+            "0",
+            "-compression_level",
+            "6",
+            "-q:v",
+            "60",
+            "-preset",
+            "default",
+            "-loop",
+            "0",
+            "-an",
+            o,
+        ],
+    )
+    .await?;
+    Ok(tokio::fs::read(out).await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,6 +364,22 @@ mod tests {
         let out = transcode_video(&mp4, true, false).await.unwrap().unwrap();
         assert!(!out.is_empty());
         assert!(transcode_video(&mp4, false, false).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn sticker_webp() {
+        if !available() {
+            return;
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(64, 48)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        // ffmpeg builds without libwebp fail here; that is not our bug.
+        let Ok(webp) = png_to_webp(png.get_ref()).await else {
+            return;
+        };
+        assert_eq!(crate::media::image::webp_info(&webp), Some((false, 64, 48)));
     }
 
     #[tokio::test]

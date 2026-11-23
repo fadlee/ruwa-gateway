@@ -19,8 +19,9 @@ use crate::{
     usecase::{
         send::{self, MessageRequest, SendResponse},
         send_media::{
-            self as sm, AudioRequest, ContactRequest, FileRequest, ImageRequest, LinkRequest,
-            LocationRequest, SendSettings, VideoRequest,
+            self as sm, AudioRequest, ChatPresenceRequest, ContactRequest, FileRequest,
+            ImageRequest, LinkRequest, LocationRequest, PresenceRequest, SendSettings,
+            StickerRequest, VideoRequest,
         },
     },
 };
@@ -35,6 +36,9 @@ pub fn router() -> Router<AppState> {
         .route("/send/contact", post(send_contact))
         .route("/send/location", post(send_location))
         .route("/send/link", post(send_link))
+        .route("/send/sticker", post(send_sticker))
+        .route("/send/presence", post(send_presence))
+        .route("/send/chat-presence", post(send_chat_presence))
         // GOWA sets Fiber's BodyLimit to the max video size.
         .layer(DefaultBodyLimit::max(media::MAX_VIDEO_SIZE + 1_000_000))
 }
@@ -145,4 +149,36 @@ async fn send_link(
     Body(req): Body<LinkRequest>,
 ) -> ApiResult<Response> {
     Ok(ok(sm::send_link(&device, req, settings(&state)).await?))
+}
+
+async fn send_presence(
+    Extension(Device(device)): Extension<Device>,
+    Body(req): Body<PresenceRequest>,
+) -> ApiResult<Response> {
+    Ok(ok(sm::send_presence(&device, req).await?))
+}
+
+async fn send_chat_presence(
+    State(state): State<AppState>,
+    Extension(Device(device)): Extension<Device>,
+    Body(req): Body<ChatPresenceRequest>,
+) -> ApiResult<Response> {
+    Ok(ok(
+        sm::send_chat_presence(&device, req, settings(&state)).await?
+    ))
+}
+
+async fn send_sticker(
+    State(state): State<AppState>,
+    Extension(Device(device)): Extension<Device>,
+    mut body: Payload<StickerRequest>,
+) -> ApiResult<Response> {
+    let file = body.file("sticker");
+    Ok(ok(sm::send_sticker(
+        &device,
+        body.value,
+        file,
+        settings(&state),
+    )
+    .await?))
 }

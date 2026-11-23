@@ -1353,3 +1353,80 @@ async fn group_photo_validation() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn send_presence_contract() {
+    let h = harness().await;
+    expect_validation(
+        &h,
+        post_json("/send/presence", r#"{"type":"away"}"#),
+        "type: must be a valid value.",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json("/send/chat-presence", "{}"),
+        "action: cannot be blank; phone: cannot be blank.",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json(
+            "/send/chat-presence",
+            r#"{"phone":"628123","action":"jump"}"#,
+        ),
+        "action: must be a valid value.",
+    )
+    .await;
+    for (path, body) in [
+        ("/send/presence", r#"{"type":"available"}"#),
+        (
+            "/send/chat-presence",
+            r#"{"phone":"628123","action":"start"}"#,
+        ),
+    ] {
+        let (status, resp) = call(&h.app, post_json(path, body)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        assert_eq!(resp["code"], "AUTHENTICATION_ERROR");
+    }
+}
+
+#[tokio::test]
+async fn send_sticker_contract() {
+    let h = harness().await;
+    expect_validation(
+        &h,
+        post_json("/send/sticker", r#"{"phone":"628"}"#),
+        "either Sticker or StickerURL must be provided",
+    )
+    .await;
+    expect_validation(
+        &h,
+        multipart(
+            "/send/sticker",
+            &[("phone", "628")],
+            Some(("sticker", "a.bmp", "image/bmp", b"BM")),
+        ),
+        "your sticker is not allowed. please use jpg/jpeg/png/webp/gif",
+    )
+    .await;
+    expect_validation(
+        &h,
+        multipart(
+            "/send/sticker",
+            &[
+                ("phone", "628"),
+                ("sticker_url", "https://example.com/a.png"),
+            ],
+            Some(("sticker", "a.png", "image/png", b"x")),
+        ),
+        "cannot provide both Sticker file and StickerURL",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json("/send/sticker", r#"{"phone":"628","sticker_url":"nope"}"#),
+        "StickerURL must be a valid URL",
+    )
+    .await;
+}

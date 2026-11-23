@@ -6,14 +6,14 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 2 (M2) kode selesai. Fase 1+2 **belum diuji manual dengan HP** (ditunda atas
-  permintaan user) → lanjut Fase 3 boleh, tapi uji manual tetap prioritas sebelum rilis.
-- **Build**: `cargo test` (90 test: 67 unit + 23 HTTP; 1 test jaringan `#[ignore]`),
+- **Fase aktif**: Fase 2 (M2) selesai + gowa-ui + `/ws` (dari M4) → berikutnya Fase 3 (chat storage).
+- **Build**: `cargo test` (94 test: 68 unit + 26 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
-- **Terverifikasi live tanpa akun**: handshake + QR (`/app/login`, `/devices/{id}/login`), multi-device,
-  registry bertahan setelah restart (termasuk webhook per device), link preview ke internet.
-- **Belum terverifikasi live**: semua yang butuh akun ter-pair (kirim teks/media, upload ke CDN WhatsApp,
-  webhook pesan masuk/media/receipt/presence, auto-download, `/user/*`, logout remote, temp ban).
+- **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
+- **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
+  gowa-ui terunduh & dirender, indikator `/ws` hijau di headless Chrome.
+- **Belum terverifikasi live**: kirim media (upload ke CDN WhatsApp), webhook pesan masuk/media/receipt/presence,
+  auto-download, `/user/*`, logout dari HP (`device.logged_out`), temp ban.
 - **whatsapp-rust rev**: `94877bedb6cd473864f9f6b332a5c13d5fbef789`
 - **GOWA acuan**: `3744c92a24fa0806c68df9bf6a34db4340016e10` (snapshot di `docs/upstream/`)
 

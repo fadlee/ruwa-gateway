@@ -81,6 +81,13 @@ pub struct Config {
     )]
     pub webhook_ignore_jids: Vec<String>,
 
+    #[arg(
+        long = "webhook-insecure-skip-verify",
+        env = "WHATSAPP_WEBHOOK_INSECURE_SKIP_VERIFY",
+        default_value_t = false
+    )]
+    pub webhook_insecure_skip_verify: bool,
+
     #[arg(long = "auto-reply", env = "WHATSAPP_AUTO_REPLY", default_value = "")]
     pub auto_reply: String,
 

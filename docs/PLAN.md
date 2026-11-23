@@ -10,20 +10,22 @@ Lihat [SPEC.md](SPEC.md) untuk kontrak. Dokumen ini urutan kerja dan definisi se
 - [x] axum server: `/health`, envelope response `{code,message,results}`, error type
 - [x] Middleware basic auth + aturan refuse-to-start
 - [x] Snapshot kontrak upstream ke `docs/upstream/` (`openapi.yaml`, `webhook-payload.md`, `.env.example`) + catat commit GOWA
-- [ ] Ekstrak daftar kode error GOWA ke `docs/error-codes.md`
+- [x] Ekstrak daftar kode error GOWA ke `docs/error-codes.md`
 
 **Selesai bila**: `cargo run -- rest` menyala, `GET /health` OK, `cargo test` & `cargo clippy` hijau.
 
 ## Fase 1 — M1: satu device, kirim teks, webhook dasar
 
-- [ ] `DeviceManager` dengan satu slot default; `SqliteStore` per slot
-- [ ] `/app/login` (QR PNG di `/statics/qrcode/`), `/app/login-with-code`, `/app/logout`, `/app/reconnect`, `/app/status`, `/app/devices`, `/app/info`
-- [ ] Middleware device scope (`X-Device-Id` / `device_id` / default tunggal)
-- [ ] Normalisasi JID (port `pkg/utils` GOWA) + unit test
-- [ ] `/send/message` (teks, reply, mentions, `@everyone`, duration)
-- [ ] Event pump → `message`, `message.ack`, `device.logged_out`
-- [ ] Webhook dispatcher: multi URL, HMAC, filter event, ignore JIDs, retry
-- [ ] Golden test untuk contoh `message` (text, reply, mentions) & `message.ack`
+- [x] `DeviceManager` dengan satu slot default; `SqliteStore` per slot
+- [x] `/app/login` (QR PNG di `/statics/qrcode/`), `/app/login-with-code`, `/app/logout`, `/app/reconnect`, `/app/status`, `/app/devices`, `/app/info` — QR terverifikasi live; pair code belum dites dengan HP
+- [x] Middleware device scope (`X-Device-Id` / `device_id` / default tunggal)
+- [x] Normalisasi JID (port `pkg/utils` GOWA) + unit test
+- [x] `/send/message` (teks, reply, mentions, `@everyone`, duration) — belum dites kirim ke HP sungguhan
+- [x] Event pump → `message`, `message.ack`, `device.logged_out` (+ `message.reaction|revoked|edited` lebih awal dari rencana M2)
+- [x] Webhook dispatcher: multi URL, HMAC, filter event, ignore JIDs, retry
+- [x] Golden test untuk contoh `message` (text, reply, mentions) & `message.ack`
+
+- [ ] **Uji manual dengan akun test** (lihat HANDOFF): scan QR, kirim teks, terima webhook
 
 **Selesai bila**: pairing via QR berhasil dengan akun test, kirim teks dari API sampai di HP,
 pesan masuk memicu webhook dengan payload identik contoh GOWA.

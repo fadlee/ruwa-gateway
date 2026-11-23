@@ -1,17 +1,23 @@
-//! HTTP Basic auth, matching GOWA's `APP_BASIC_AUTH`.
-//! WebSocket clients may pass `?authorization=<base64(user:pass)>` instead,
+//! HTTP Basic auth, matching GOWA's `APP_BASIC_AUTH` (Fiber `basicauth`):
+//! a failure is a plain-text `401 Unauthorized` with a `WWW-Authenticate`
+//! challenge, not a JSON envelope.
+//!
+//! The WebSocket endpoint also accepts `?authorization=<base64(user:pass)>`,
 //! since browsers cannot set headers on WebSocket upgrades.
 
 use axum::{
     extract::{Request, State},
-    http::header::AUTHORIZATION,
+    http::{
+        StatusCode,
+        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+    },
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use subtle::ConstantTimeEq;
 
-use super::{AppState, response::ApiError};
+use super::AppState;
 use crate::config::Credential;
 
 pub async fn basic_auth(State(state): State<AppState>, req: Request, next: Next) -> Response {
@@ -26,11 +32,18 @@ pub async fn basic_auth(State(state): State<AppState>, req: Request, next: Next)
         .and_then(|v| v.strip_prefix("Basic "))
         .map(str::to_owned);
     let from_query = || {
+        if !req.uri().path().ends_with("/ws") {
+            return None;
+        }
         req.uri().query().and_then(|q| {
             q.split('&')
                 .filter_map(|kv| kv.split_once('='))
                 .find(|(k, _)| *k == "authorization")
-                .map(|(_, v)| v.to_owned())
+                .map(|(_, v)| {
+                    percent_encoding::percent_decode_str(v)
+                        .decode_utf8_lossy()
+                        .into_owned()
+                })
         })
     };
 
@@ -41,17 +54,35 @@ pub async fn basic_auth(State(state): State<AppState>, req: Request, next: Next)
     {
         next.run(req).await
     } else {
-        ApiError::unauthorized().into_response()
+        unauthorized()
     }
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(
+            WWW_AUTHENTICATE,
+            r#"Basic realm="Restricted", charset="UTF-8""#,
+        )],
+        "Unauthorized",
+    )
+        .into_response()
 }
 
 fn is_valid(token: &str, creds: &[Credential]) -> bool {
     let Ok(decoded) = STANDARD.decode(token.trim()) else {
         return false;
     };
-    // Compare against every credential to keep timing independent of position.
-    creds.iter().fold(false, |ok, c| {
-        let expected = format!("{}:{}", c.user, c.pass);
-        ok | bool::from(expected.as_bytes().ct_eq(&decoded))
-    })
+    let Some((user, pass)) = std::str::from_utf8(&decoded)
+        .ok()
+        .and_then(|s| s.split_once(':'))
+    else {
+        return false;
+    };
+    // GOWA looks the user up, then compares the password in constant time.
+    creds
+        .iter()
+        .find(|c| c.user == user)
+        .is_some_and(|c| bool::from(c.pass.as_bytes().ct_eq(pass.as_bytes())))
 }

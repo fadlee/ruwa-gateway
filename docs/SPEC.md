@@ -60,9 +60,11 @@ Satu binary crate `ruwa-gateway` dengan modul:
 | Modul | Tanggung jawab |
 |---|---|
 | `config` | CLI (clap) + env, nama mengikuti GOWA |
-| `http` | router axum, middleware, response envelope, error |
-| `http::routes::*` | satu file per grup endpoint GOWA |
-| `device` | `DeviceManager`, `DeviceInstance`, lifecycle (login, logout, reconnect) |
+| `http` | router axum, middleware (auth, device scope, CORS), response envelope |
+| `http::routes::*` | satu file per grup endpoint GOWA (handler tipis) |
+| `usecase` | logika GOWA `usecase/`: validasi, resolusi JID, builder pesan |
+| `error` | `ApiError` dengan kode/pesan GOWA (lihat `docs/error-codes.md`) |
+| `device` | `DeviceManager`, `DeviceInstance`, lifecycle (login, logout, reconnect), event pump |
 | `wa` | adapter tipis ke whatsapp-rust (konversi JID, builder pesan, upload media) |
 | `events` | mapping `whatsapp_rust::Event` → event GOWA |
 | `webhook` | dispatcher, filter, HMAC, retry |
@@ -90,19 +92,21 @@ Semua response JSON:
 ```
 
 - `results` di-omit bila kosong (`omitempty`).
-- Error validasi: HTTP 400, `code: "BAD_REQUEST"` (atau kode spesifik GOWA), `message` = pesan error.
-- Error internal: HTTP 500, `code: "INTERNAL_SERVER_ERROR"`.
-- Unauthorized: HTTP 401, `message: "Unauthorized access"`.
-- Kode error spesifik GOWA yang harus dipertahankan, contoh: `AVATAR_NOT_SET` (404),
-  `AVATAR_HIDDEN` (403), `DEVICE_NOT_FOUND`, `DEVICE_ID_REQUIRED`.
-  Daftar lengkap diekstrak saat fase 0 dari `ui/rest` dan `pkg/error` GOWA.
+- Error validasi: HTTP 400, `code: "VALIDATION_ERROR"`, pesan gaya ozzo (`phone: cannot be blank.`).
+- Error lain / gagal bind body: HTTP 500, `code: "INTERNAL_SERVER_ERROR"`.
+- Daftar lengkap kode: [error-codes.md](error-codes.md).
+- **Bukan JSON**: basic auth gagal → 401 teks `Unauthorized` + `WWW-Authenticate`;
+  `GET /health` → teks `OK`.
 
 ### 4.2 Autentikasi
 
 - `APP_BASIC_AUTH=user1:pass1,user2:pass2` → HTTP Basic.
 - Kosong + bind non-loopback → **refuse to start** kecuali `APP_ALLOW_UNAUTHENTICATED=true`.
-- WebSocket: `?authorization=<base64(user:pass)>` diterima sebagai alternatif header.
-- `/health` tanpa auth.
+- WebSocket (`/ws`): `?authorization=<base64(user:pass)>` diterima sebagai alternatif header.
+- Tanpa auth: `/health` (selalu di root, mengabaikan base path) dan `{base}/statics/*`
+  (QR & media; GOWA mendaftarkannya sebelum middleware auth).
+- `/app/info` butuh auth tapi tidak butuh device; route lain butuh auth + device scope
+  (termasuk `/app/devices`, sama seperti GOWA).
 
 ### 4.3 Device scoping
 
@@ -110,6 +114,8 @@ Semua response JSON:
 - Jika tidak ada dan hanya satu device terdaftar → pakai device itu.
 - Jika tidak ada dan >1 device → 400 `device_id is required via X-Device-Id header or device_id query`.
 - Device tidak dikenal → 404 `device not found; create a device first from /api/devices or provide a valid X-Device-Id`.
+- `X-Device-Id` juga boleh berisi JID akun; header di-URL-decode.
+- Bila belum ada slot sama sekali, slot `default` dibuat otomatis (pengganti instance transient GOWA).
 
 ### 4.4 Cakupan endpoint per milestone
 

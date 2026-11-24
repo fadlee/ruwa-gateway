@@ -50,6 +50,7 @@ struct FakeResolver {
     display: String,
     /// `Some(path)` enables auto-download and returns this path.
     saved: Option<String>,
+    ignore_status_media: bool,
 }
 
 impl FakeResolver {
@@ -61,6 +62,7 @@ impl FakeResolver {
                 .collect(),
             display: "Saved Contact".into(),
             saved: None,
+            ignore_status_media: false,
         }
     }
 }
@@ -78,6 +80,10 @@ impl Resolver for FakeResolver {
 
     fn auto_download(&self) -> bool {
         self.saved.is_some()
+    }
+
+    fn ignore_status_media(&self) -> bool {
+        self.ignore_status_media
     }
 
     async fn save_media<'a>(&'a self, _: MediaRef<'a>) -> anyhow::Result<String> {
@@ -158,6 +164,34 @@ async fn image_auto_download_with_caption() {
     );
     let actual = message_envelope(&r, &m, "628987654321@s.whatsapp.net").await;
     assert_matches_doc(&actual, &doc_example_n("Image Message", 1));
+}
+
+async fn status_image(r: &FakeResolver) -> Value {
+    let m = incoming(
+        "S1",
+        "status@broadcast",
+        "628123456789@s.whatsapp.net",
+        "John Doe",
+        "2025-07-13T11:05:51Z",
+        image(None),
+    );
+    message_payload(r, &m).await.1["image"].clone()
+}
+
+#[tokio::test]
+async fn ignore_status_media_keeps_url_form() {
+    let path = "statics/media/1-x.jpeg";
+    let mut r = saving(path);
+    assert_eq!(status_image(&r).await, path);
+
+    r.ignore_status_media = true;
+    assert_eq!(
+        status_image(&r).await,
+        json!({"url": "https://mmg.whatsapp.net/...", "caption": ""})
+    );
+    // Regular chats still download.
+    let m = media_msg("M1", "2025-07-13T11:05:51Z", image(None));
+    assert_eq!(message_payload(&r, &m).await.1["image"], path);
 }
 
 #[tokio::test]

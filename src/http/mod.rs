@@ -9,6 +9,7 @@
 pub mod auth;
 pub mod device_scope;
 pub mod extract;
+pub mod forwarded;
 pub mod response;
 pub mod routes;
 
@@ -34,6 +35,8 @@ pub struct Settings {
     pub os: String,
     pub base_path: String,
     pub cors_allowed_origins: Vec<String>,
+    /// `APP_TRUSTED_PROXIES`.
+    pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 
 #[derive(Clone)]

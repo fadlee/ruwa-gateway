@@ -3,7 +3,6 @@
 use axum::{
     Extension, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, header::HOST},
     response::Response,
     routing::{get, post},
 };
@@ -11,7 +10,7 @@ use axum::{
 use super::message::public_static_path;
 use crate::{
     error::ApiResult,
-    http::{AppState, device_scope::Device, extract::Body, response},
+    http::{AppState, device_scope::Device, extract::Body, forwarded::PublicOrigin, response},
     usecase::newsletter::{self, IdRequest, InfoQuery, MessagesQuery},
 };
 
@@ -77,17 +76,13 @@ async fn download(
     Extension(Device(device)): Extension<Device>,
     Path(server_id): Path<String>,
     Query(q): Query<DownloadQuery>,
-    headers: HeaderMap,
+    origin: PublicOrigin,
 ) -> ApiResult<Response> {
     let media_dir = state.devices.options().media_dir.clone();
     let mut res =
         newsletter::download_media(&device, &server_id, &q.newsletter_id, &media_dir).await?;
     if let Some(path) = public_static_path(&res.file_path) {
-        let host = headers
-            .get(HOST)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("localhost");
-        res.file_url = format!("http://{host}{}{path}", state.settings.base_path);
+        res.file_url = origin.url(&state.settings.base_path, &path);
     }
     Ok(response::success(res.status.clone(), res))
 }

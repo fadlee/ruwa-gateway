@@ -35,6 +35,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         events: non_empty(&cfg.webhook_events),
         ignore_jids: non_empty(&cfg.webhook_ignore_jids),
         insecure_skip_verify: cfg.webhook_insecure_skip_verify,
+        merge_global: cfg.webhook_device_merge_global,
     })?;
     let db = Db::open(&cfg.db_uri)?;
     let presence_opts = PresenceOptions {
@@ -50,6 +51,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             os: cfg.os.clone(),
             media_dir: PathBuf::from("statics/media"),
             auto_download_media: cfg.auto_download_media,
+            ignore_status_media: cfg.ignore_status_media,
             auto_reject_call: cfg.auto_reject_call,
             auto_mark_read: cfg.auto_mark_read,
             auto_reply: cfg.auto_reply.clone(),
@@ -100,6 +102,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             os: cfg.os.clone(),
             base_path: cfg.normalized_base_path(),
             cors_allowed_origins: cfg.cors_allowed_origins.clone(),
+            trusted_proxies: cfg.trusted_proxies()?,
         }),
     };
     let app = http::router(state);
@@ -110,9 +113,12 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .with_context(|| format!("bind {addr}"))?;
     tracing::info!(%addr, "ruwa-gateway listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     for device in devices.list().await {
         device.stop().await;

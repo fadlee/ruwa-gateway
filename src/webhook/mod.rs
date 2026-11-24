@@ -5,7 +5,9 @@
 //! - `X-Hub-Signature-256: sha256=<hex HMAC-SHA256(body, secret)>`,
 //! - 5 attempts per URL, backoff 1s doubling, 10s request timeout,
 //! - event allow-list (`WHATSAPP_WEBHOOK_EVENTS`, case-insensitive),
-//! - JID ignore list (`WHATSAPP_WEBHOOK_IGNORE_JIDS`, `@suffix` wildcards).
+//! - JID ignore list (`WHATSAPP_WEBHOOK_IGNORE_JIDS`, `@suffix` wildcards),
+//! - `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`: a device webhook adds to the
+//!   global URLs instead of replacing them.
 
 use std::time::Duration;
 
@@ -36,6 +38,8 @@ pub struct WebhookConfig {
     pub events: Vec<String>,
     pub ignore_jids: Vec<String>,
     pub insecure_skip_verify: bool,
+    /// `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`.
+    pub merge_global: bool,
 }
 
 /// Effective delivery target for one event.
@@ -107,14 +111,56 @@ impl Dispatcher {
         }
     }
 
+    /// Delivery legs for one event after the event and JID filters: the
+    /// device (or global) target, plus, with `merge_global` and a device
+    /// URL, the global URLs under the global secret and event list. A global
+    /// URL equal to a delivering device URL is not hit twice; when the device
+    /// filter drops the event, that URL still gets it as a global target
+    /// (GOWA `forwardPayloadWithWebhookConfig`).
+    pub fn legs(
+        &self,
+        event: &str,
+        envelope: &Map<String, Value>,
+        device: &DeviceWebhook,
+    ) -> Vec<Target> {
+        if jid_ignored(&self.config.ignore_jids, envelope) {
+            return vec![];
+        }
+        let primary = self.target(device);
+        let device_has_url = device
+            .webhook_url
+            .as_deref()
+            .is_some_and(|u| !u.trim().is_empty());
+        let primary_allowed = !primary.urls.is_empty() && event_allowed(&primary.events, event);
+        let mut legs = Vec::with_capacity(2);
+        if self.config.merge_global && device_has_url && event_allowed(&self.config.events, event) {
+            let urls: Vec<String> = self
+                .config
+                .urls
+                .iter()
+                .filter(|u| !(primary_allowed && primary.urls.contains(u)))
+                .cloned()
+                .collect();
+            if !urls.is_empty() {
+                legs.push(Target {
+                    urls,
+                    secret: self.config.secret.clone(),
+                    events: self.config.events.clone(),
+                    insecure_skip_verify: self.config.insecure_skip_verify,
+                });
+            }
+        }
+        if primary_allowed {
+            legs.insert(0, primary);
+        }
+        legs
+    }
+
     /// Filter, sign, and deliver `envelope` in the background.
     /// `envelope` must already carry `event`, `device_id`, `payload`.
     pub fn send(&self, event: &str, envelope: Map<String, Value>, device: &DeviceWebhook) {
-        let target = self.target(device);
-        if target.urls.is_empty()
-            || !event_allowed(&target.events, event)
-            || jid_ignored(&self.config.ignore_jids, &envelope)
-        {
+        let legs = self.legs(event, &envelope, device);
+        if legs.is_empty() {
             tracing::debug!(event, "webhook skipped by filter");
             return;
         }
@@ -125,22 +171,24 @@ impl Dispatcher {
                 return;
             }
         };
-        let signature = sign(&body, &target.secret);
-        let http = if target.insecure_skip_verify {
-            &self.http_insecure
-        } else {
-            &self.http
-        };
-        for url in target.urls {
-            let http = http.clone();
-            let body = body.clone();
-            let signature = signature.clone();
-            let event = event.to_owned();
-            tokio::spawn(async move {
-                if let Err(error) = deliver(&http, &url, body, &signature).await {
-                    tracing::warn!(%url, event, %error, "webhook delivery failed");
-                }
-            });
+        for target in legs {
+            let signature = sign(&body, &target.secret);
+            let http = if target.insecure_skip_verify {
+                &self.http_insecure
+            } else {
+                &self.http
+            };
+            for url in target.urls {
+                let http = http.clone();
+                let body = body.clone();
+                let signature = signature.clone();
+                let event = event.to_owned();
+                tokio::spawn(async move {
+                    if let Err(error) = deliver(&http, &url, body, &signature).await {
+                        tracing::warn!(%url, event, %error, "webhook delivery failed");
+                    }
+                });
+            }
         }
     }
 }
@@ -255,8 +303,80 @@ mod tests {
             events: vec!["message".into()],
             ignore_jids: vec![],
             insecure_skip_verify: false,
+            merge_global: false,
         })
         .unwrap()
+    }
+
+    fn envelope(chat: &str) -> Map<String, Value> {
+        let Value::Object(map) = json!({"event": "message", "payload": {"chat_id": chat}}) else {
+            unreachable!()
+        };
+        map
+    }
+
+    fn summary(legs: &[Target]) -> Vec<(Vec<String>, String)> {
+        legs.iter()
+            .map(|t| (t.urls.clone(), t.secret.clone()))
+            .collect()
+    }
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn merge_global_adds_global_leg() {
+        let mut d = dispatcher();
+        d.config.urls = s(&["https://global", "https://shared"]);
+        let hook = DeviceWebhook {
+            webhook_url: Some("https://shared".into()),
+            webhook_secret: "dev".into(),
+            ..Default::default()
+        };
+        let env = envelope("1@s.whatsapp.net");
+        // Off: the device URL replaces the global ones.
+        assert_eq!(
+            summary(&d.legs("message", &env, &hook)),
+            [(s(&["https://shared"]), "dev".to_owned())]
+        );
+
+        d.config.merge_global = true;
+        // Global leg keeps the global secret; the shared URL is hit once.
+        assert_eq!(
+            summary(&d.legs("message", &env, &hook)),
+            [
+                (s(&["https://shared"]), "dev".to_owned()),
+                (s(&["https://global"]), "g".to_owned()),
+            ]
+        );
+        // Device filter drops the event: the shared URL still gets it as a
+        // global target.
+        let filtered = DeviceWebhook {
+            webhook_events: "message.ack".into(),
+            ..hook.clone()
+        };
+        assert_eq!(
+            summary(&d.legs("message", &env, &filtered)),
+            [(s(&["https://global", "https://shared"]), "g".to_owned())]
+        );
+        // Global filter drops the event: device leg only.
+        let ack_only = DeviceWebhook {
+            webhook_events: "group.info".into(),
+            ..hook.clone()
+        };
+        assert_eq!(
+            summary(&d.legs("group.info", &env, &ack_only)),
+            [(s(&["https://shared"]), "dev".to_owned())]
+        );
+        // No device URL: plain global delivery, no duplicate leg.
+        assert_eq!(
+            summary(&d.legs("message", &env, &DeviceWebhook::default())),
+            [(s(&["https://global", "https://shared"]), "g".to_owned())]
+        );
+        // The JID ignore list applies to both legs.
+        d.config.ignore_jids = s(&["@g.us"]);
+        assert!(d.legs("message", &envelope("1@g.us"), &hook).is_empty());
     }
 
     #[test]

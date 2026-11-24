@@ -11,10 +11,11 @@
   Webhook: semua event ada kecuali `newsletter.joined|left|mute` (SDK tak punya event-nya).
   Fase 1–3 tuntas (kode); Fase 4: scheduler, newsletter (follow/unfollow/info/messages/download/live-updates +
   `newsletter.message`), gowa-ui, `/ws`, `/app/metrics`, Docker/rilis selesai.
-- **Config GOWA (2026-11-24)**: `WHATSAPP_PROXY`, `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING`, `APP_TIMEZONE` selesai.
+- **Config GOWA (2026-11-24)**: `WHATSAPP_PROXY`, `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING`, `APP_TIMEZONE`,
+  `APP_TRUSTED_PROXIES`, `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`, `WHATSAPP_IGNORE_STATUS_MEDIA` selesai.
   Sisa env yang belum: lihat "Perbedaan perilaku" dan checklist di PLAN.md.
 - **Rilis**: versi crate `0.1.0-rc.2` (rc.1 sudah dirilis dan workflow terbukti hijau di GitHub: CI, tarball amd64+arm64, image GHCR); `Dockerfile` (+ `.dockerignore`), `.github/workflows/ci.yml` dan `release.yml` ada; image sudah dibangun & di-smoke-test lokal (health, `/app/metrics`, SIGTERM 1 dtk, ffmpeg, uid 10001; 258MB). Image arm64 belum pernah dijalankan.
-- **Build**: `cargo test` (250 test: 199 unit + 51 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Build**: `cargo test` (255 test: 204 unit + 51 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -37,16 +38,21 @@
    `APP_HOST=127.0.0.1 cargo run -- rest` dari direktori kerja terpisah (server menulis `storages/` & `statics/` di cwd),
    buka `http://localhost:3000/`. Tambahan untuk fitur baru: kirim lewat API dengan
    `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING=true` → webhook `message` `is_from_me:true`; `WHATSAPP_PROXY` ke proxy sungguhan
-   lalu kirim media (upload CDN lewat proxy); `APP_TIMEZONE=Asia/Jakarta` → `GET /chats` ber-offset `+07:00`.
+   lalu kirim media (upload CDN lewat proxy); `APP_TIMEZONE=Asia/Jakarta` → `GET /chats` ber-offset `+07:00`;
+   `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL=true` + webhook per device → event sampai di kedua URL;
+   `WHATSAPP_IGNORE_STATUS_MEDIA=true` → status bergambar dari kontak tidak diunduh.
 2. Bandingkan JSON `/group/info` dengan output GOWA asli (ditulis dari ingatan struct whatsmeow).
 3. Sisa Fase 4: newsletter `message-updates|directory` + event `newsletter.joined|left|mute` (lihat catatan newsletter).
-4. Env GOWA berikutnya yang paling berguna: `APP_TRUSTED_PROXIES` (`file_url` https di balik reverse proxy).
+4. Env GOWA tersisa: `WHATSAPP_FULL_HISTORY_*` (cek dulu dukungan SDK), `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`, `APP_TRUSTED_ORIGINS`.
 5. Rilis stabil: naikkan `version` ke `0.1.0` lalu push tag `v0.1.0`.
 
 ## Keputusan yang sudah diambil
 
 | Tanggal | Keputusan | Alasan |
 |---|---|---|
+| 2026-11-24 | `APP_TRUSTED_PROXIES` meniru Fiber `TrustProxy`: `X-Forwarded-Proto`/`-Protocol`/`-Ssl`/`X-Url-Scheme` + `X-Forwarded-Host` (nilai pertama) hanya dipakai bila IP peer (`ConnectInfo`, IPv4-mapped dinormalkan) ada di daftar; dipakai `qr_link` (`/app/login`, `/devices/{id}/login`) dan `file_url` (`/message/{id}/download`, `/newsletter/messages/{id}/download`). Entri salah → gagal start | sebelumnya `qr_link` selalu percaya `X-Forwarded-*` dari siapa pun (bisa dipalsukan) dan `file_url` selalu `http://`. **Perubahan perilaku**: tanpa env ini header forwarded kini diabaikan, sama dengan GOWA default |
+| 2026-11-24 | `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL` = `Dispatcher::legs`: leg device (+fallback secret/event global) dan leg global (secret, filter event, insecure-skip-verify global); URL global yang sama dengan URL device yang mengirim dibuang; bila filter device menolak event, URL itu tetap dapat sebagai target global; ignore-JID berlaku untuk keduanya | sama dengan GOWA `forwardPayloadWithWebhookConfig` |
+| 2026-11-24 | `WHATSAPP_IGNORE_STATUS_MEDIA=true` = media dari `status@broadcast` tidak di-auto-download untuk webhook (payload bentuk `{url, ...}` seperti auto-download mati) | di GOWA flag ini hanya memengaruhi `handleImageMessage` (unduh gambar terpisah yang tak kita punya); webhook GOWA tetap mengunduh. Arti yang dipakai = maksud flag ("ignore downloading status media") |
 | 2026-11-24 | `WHATSAPP_PROXY` diimplementasikan di sisi kita: `StreamDialer` sendiri (SOCKS5 RFC 1928/1929, HTTP/HTTPS `CONNECT`) dipasang via `TokioWebSocketTransportFactory::with_dialer`, plus `UreqHttpClient::with_agent` (ureq `socks-proxy`) untuk media/version fetch, satu klien dibagi semua bot | whatsapp-rust tak punya proxy bawaan; whatsmeow `SetProxyAddress` juga mencakup media. URL dari user (media, link preview) tetap langsung, seperti GOWA |
 | 2026-11-24 | `WHATSAPP_PROXY` tak valid → **gagal start** (GOWA: log error lalu konek langsung); divalidasi di `Config::validate`, bukan `value_parser` clap | konek langsung diam-diam membocorkan trafik yang mestinya lewat proxy; clap mencetak nilai mentah (berisi password) di pesan error |
 | 2026-11-24 | SOCKS5 selalu mengirim nama host (DNS di proxy), `socks5` = `socks5h`; ureq diberi `socks5h://` | perilaku Go `x/net/proxy`; DNS lokal bisa diracuni di jaringan DPI |
@@ -109,6 +115,11 @@
   semua HTTP SDK (upload/unduh media, version fetch). Yang **tidak**: unduh URL dari request user, link preview, update gowa-ui,
   webhook (sama dengan GOWA untuk dua yang pertama). Proxy HTTPS: TLS ke proxy memakai `default_tls_connector` SDK
   (webpki roots), lalu TLS kedua ke WhatsApp di dalam tunnel. Upload media lewat proxy belum diuji dengan akun.
+- `APP_TRUSTED_PROXIES`: `.env.example` GOWA berisi `0.0.0.0/0` (percaya semua peer IPv4, bukan IPv6). Router di-serve dengan
+  `into_make_service_with_connect_info::<SocketAddr>()`; test in-process (`oneshot`) tak punya `ConnectInfo` → tak pernah
+  dipercaya. Server kita tak melayani TLS sendiri, jadi skema tanpa proxy tepercaya selalu `http`.
+- `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`: tiap leg ditandatangani dengan secret-nya sendiri (body sama). Leg dikirim paralel per URL
+  (tiap URL di task sendiri, seperti sebelumnya), jadi satu URL lambat tak menahan yang lain.
 - `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING`: dikirim dari `usecase::send::deliver` (semua `/send/*`, forward, jadwal) setelah ack
   server & simpan; nack tidak dikirim. Tidak mencakup reaction/revoke/edit/auto-reply (tak lewat `deliver`). Job `Sent` masuk
   antrean processor yang sama, payload dari `events::message_payload` (sama persis dengan pesan `is_from_me` dari HP; ada test).
@@ -173,9 +184,8 @@
   - `/group/info-from-link`: `participant_count` = jumlah peserta di respons (atau atribut `size` bila daftar kosong).
   - `/group/join-with-link` pada grup yang butuh persetujuan tetap mengembalikan `group_id` (GOWA/whatsmeow sama), tanpa penanda "pending".
   - `/group/topic` memakai `PreviousDescription::Resolve` (satu IQ tambahan untuk membaca id deskripsi sebelumnya).
-  - Env GOWA yang belum didukung (di luar Chatwoot/MCP/Postgres): `APP_TRUSTED_PROXIES`, `APP_TRUSTED_ORIGINS`,
-    `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`, `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`, `WHATSAPP_FULL_HISTORY_SYNC|DAYS|SIZE_MB`,
-    `WHATSAPP_IGNORE_STATUS_MEDIA`, `WHATSAPP_CHAT_STORAGE`, batas ukuran via env (`WHATSAPP_SETTING_MAX_*`; konstanta default GOWA dipakai).
+  - Env GOWA yang belum didukung (di luar Chatwoot/MCP/Postgres): `APP_TRUSTED_ORIGINS`,
+    `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`, `WHATSAPP_FULL_HISTORY_SYNC|DAYS|SIZE_MB`, `WHATSAPP_CHAT_STORAGE`, batas ukuran via env (`WHATSAPP_SETTING_MAX_*`; konstanta default GOWA dipakai).
 - Header signature webhook GOWA: `X-Hub-Signature-256: sha256=<hex>`; body JSON key tersortir (Go map).
 - Event `message` tidak punya `timestamp` top-level; `message.ack` dan `device.*` punya.
 - Fitur `legacy-session-interop` di whatsapp-rust kandidat untuk migrasi sesi whatsmeow (Fase 5 spike).
@@ -185,6 +195,17 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — `APP_TRUSTED_PROXIES`, `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`, `WHATSAPP_IGNORE_STATUS_MEDIA`
+- `src/http/forwarded.rs` (extractor `PublicOrigin`, `is_trusted`, skema ala Fiber), `Settings.trusted_proxies`,
+  `Config::trusted_proxies` + `ConfigError::InvalidTrustedProxy`, server pakai `ConnectInfo`; `public_url` lama di `app.rs`
+  diganti `qr_link`; `file_url` download pesan/newsletter lewat `PublicOrigin`. Dep `ipnet`.
+- `webhook::Dispatcher::legs` + `WebhookConfig.merge_global`; `Resolver::ignore_status_media` (default `false`),
+  `DeviceOptions.ignore_status_media` → `MediaSettings`.
+- Test: 3 unit `http::forwarded`, `config::trusted_proxies_merge_global_and_status_media`, `webhook::merge_global_adds_global_leg`,
+  `events::ignore_status_media_keeps_url_form` (test lama `public_url_prefers_forwarded_headers` dihapus).
+  Live: `qr_link` = `https://wa.example.com/...` dengan `APP_TRUSTED_PROXIES=127.0.0.0/8`, `http://127.0.0.1:3102/...` tanpa env
+  (header forwarded sama); CIDR salah → gagal start.
 
 ### 2026-11-24 — `WHATSAPP_PROXY`, `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING`, `APP_TIMEZONE` + rapikan dokumen
 - `src/wa/proxy.rs` (parse/sensor URL, `ProxyDialer` SOCKS5/HTTP/HTTPS, agent ureq), `config.rs` (3 flag + `ProxySetting`,

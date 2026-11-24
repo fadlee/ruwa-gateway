@@ -93,6 +93,8 @@ impl EventHandler for Relay {
 pub(super) struct MediaSettings {
     pub dir: PathBuf,
     pub auto_download: bool,
+    /// `WHATSAPP_IGNORE_STATUS_MEDIA`.
+    pub ignore_status_media: bool,
     pub auto_reject_call: bool,
     /// `WHATSAPP_AUTO_MARK_READ`.
     pub auto_mark_read: bool,
@@ -959,6 +961,10 @@ impl Resolver for ClientResolver {
 
     fn auto_download(&self) -> bool {
         self.media.auto_download
+    }
+
+    fn ignore_status_media(&self) -> bool {
+        self.media.ignore_status_media
     }
 
     async fn is_group_admin(&self, group: &Jid, user: &Jid, alt: Option<&Jid>) -> bool {

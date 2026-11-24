@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use axum::{
     Extension, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, header::HOST},
     response::Response,
     routing::{get, post},
 };
@@ -17,6 +16,7 @@ use crate::{
         AppState,
         device_scope::Device,
         extract::{Body, Payload},
+        forwarded::PublicOrigin,
         response,
     },
     usecase::message::{
@@ -212,7 +212,7 @@ async fn download(
     Extension(Device(device)): Extension<Device>,
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
-    headers: HeaderMap,
+    origin: PublicOrigin,
 ) -> ApiResult<Response> {
     let phone = q.get("phone").cloned().unwrap_or_default();
     let media_dir = state.devices.options().media_dir.clone();
@@ -220,11 +220,7 @@ async fn download(
     if res.file_url.is_empty()
         && let Some(path) = public_static_path(&res.file_path)
     {
-        let host = headers
-            .get(HOST)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("localhost");
-        res.file_url = format!("http://{host}{}{path}", state.settings.base_path);
+        res.file_url = origin.url(&state.settings.base_path, &path);
     }
     Ok(response::success(res.status.clone(), res))
 }

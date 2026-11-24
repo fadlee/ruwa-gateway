@@ -2264,6 +2264,7 @@ dependencies = [
  "http-body-util",
  "image",
  "infer",
+ "ipnet",
  "libc",
  "mime_guess",
  "percent-encoding",

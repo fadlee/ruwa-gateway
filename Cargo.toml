@@ -43,6 +43,7 @@ percent-encoding = "2"
 serde_html_form = "0.2"
 mime_guess = "2"
 infer = "0.19"
+ipnet = "2"
 tempfile = "3"
 diesel = { version = "2.4", default-features = false, features = ["sqlite"] }
 diesel_migrations = { version = "2.4", default-features = false, features = ["sqlite"] }

@@ -3,7 +3,6 @@
 use axum::{
     Extension, Router,
     extract::{Query, State},
-    http::{HeaderMap, header},
     response::Response,
     routing::get,
 };
@@ -12,7 +11,7 @@ use serde_json::json;
 
 use crate::{
     error::ApiResult,
-    http::{AppState, device_scope::Device, response},
+    http::{AppState, device_scope::Device, forwarded::PublicOrigin, response},
     usecase,
 };
 
@@ -87,28 +86,22 @@ async fn metrics(State(state): State<AppState>) -> Response {
     )
 }
 
-/// `scheme://host{base}/{path}`, honouring `X-Forwarded-*` like Fiber with
-/// `TrustProxy`.
-pub(crate) fn public_url(headers: &HeaderMap, base: &str, path: &str) -> String {
-    let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
-    let scheme = get("x-forwarded-proto").unwrap_or("http");
-    let host = get("x-forwarded-host")
-        .or_else(|| get(header::HOST.as_str()))
-        .unwrap_or("localhost");
-    format!("{scheme}://{host}{base}/{path}")
+/// GOWA `fmt.Sprintf("%s://%s%s/%s", c.Scheme(), c.Host(), AppBasePath, ImagePath)`.
+pub(crate) fn qr_link(origin: &PublicOrigin, state: &AppState, image_path: &str) -> String {
+    origin.url(&state.settings.base_path, &format!("/{image_path}"))
 }
 
 async fn login(
     State(state): State<AppState>,
     Extension(Device(device)): Extension<Device>,
-    headers: HeaderMap,
+    origin: PublicOrigin,
 ) -> ApiResult<Response> {
     let qr = usecase::app::login(&state.devices, &device).await?;
     Ok(response::success(
         "Login success",
         json!({
             "device_id": device.id(),
-            "qr_link": public_url(&headers, &state.settings.base_path, &qr.image_path),
+            "qr_link": qr_link(&origin, &state, &qr.image_path),
             "qr_duration": qr.duration,
         }),
     ))
@@ -176,30 +169,4 @@ async fn status(Extension(Device(device)): Extension<Device>) -> Response {
             "jid": device.jid().unwrap_or_default(),
         }),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use axum::http::HeaderValue;
-
-    use super::*;
-
-    #[test]
-    fn public_url_prefers_forwarded_headers() {
-        let mut h = HeaderMap::new();
-        h.insert(header::HOST, HeaderValue::from_static("internal:3000"));
-        assert_eq!(
-            public_url(&h, "", "statics/x.png"),
-            "http://internal:3000/statics/x.png"
-        );
-        h.insert("x-forwarded-proto", HeaderValue::from_static("https"));
-        h.insert(
-            "x-forwarded-host",
-            HeaderValue::from_static("wa.example.com"),
-        );
-        assert_eq!(
-            public_url(&h, "/gowa", "statics/x.png"),
-            "https://wa.example.com/gowa/statics/x.png"
-        );
-    }
 }

@@ -52,6 +52,8 @@ pub struct DeviceOptions {
     pub media_dir: PathBuf,
     /// `WHATSAPP_AUTO_DOWNLOAD_MEDIA`.
     pub auto_download_media: bool,
+    /// `WHATSAPP_IGNORE_STATUS_MEDIA`.
+    pub ignore_status_media: bool,
     /// `WHATSAPP_AUTO_REJECT_CALL`.
     pub auto_reject_call: bool,
     /// `WHATSAPP_AUTO_MARK_READ`.
@@ -126,6 +128,7 @@ impl DeviceManager {
             processor::MediaSettings {
                 dir: manager.opts.media_dir.clone(),
                 auto_download: manager.opts.auto_download_media,
+                ignore_status_media: manager.opts.ignore_status_media,
                 auto_reject_call: manager.opts.auto_reject_call,
                 auto_mark_read: manager.opts.auto_mark_read,
                 auto_reply: manager.opts.auto_reply.clone(),

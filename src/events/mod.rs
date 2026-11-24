@@ -36,6 +36,11 @@ pub trait Resolver: Send + Sync {
     /// `WHATSAPP_AUTO_DOWNLOAD_MEDIA`.
     fn auto_download(&self) -> bool;
 
+    /// `WHATSAPP_IGNORE_STATUS_MEDIA`: no auto-download for status media.
+    fn ignore_status_media(&self) -> bool {
+        false
+    }
+
     /// Download and save incoming media; returns the stored path
     /// (`statics/media/<unix>-<uuid><ext>`).
     fn save_media<'a>(
@@ -279,7 +284,8 @@ pub async fn message_payload<R: Resolver>(
     if msgx::is_forwarded(&m.message) {
         p.insert("forwarded".into(), true.into());
     }
-    media_fields(r, msg, &mut p).await;
+    let download = r.auto_download() && !(r.ignore_status_media() && is_status(&m.chat));
+    media_fields(r, download, msg, &mut p).await;
     other_types(msg, &mut p);
     (MESSAGE, p)
 }
@@ -287,16 +293,22 @@ pub async fn message_payload<R: Resolver>(
 /// GOWA `buildMediaFields`. With auto-download: a path string, or
 /// `{path, caption}` when there is a caption (audio/sticker: path only).
 /// Without: `{url, ...}`. A failed download leaves the key out.
-async fn media_fields<R: Resolver>(r: &R, msg: &proto::Message, p: &mut Map<String, Value>) {
+async fn media_fields<R: Resolver>(
+    r: &R,
+    download: bool,
+    msg: &proto::Message,
+    p: &mut Map<String, Value>,
+) {
     async fn put<R: Resolver>(
         r: &R,
+        download: bool,
         p: &mut Map<String, Value>,
         key: &str,
         media: MediaRef<'_>,
         caption: Option<&str>,
         fallback: Value,
     ) {
-        if !r.auto_download() {
+        if !download {
             p.insert(key.into(), fallback);
             return;
         }
@@ -314,7 +326,7 @@ async fn media_fields<R: Resolver>(r: &R, msg: &proto::Message, p: &mut Map<Stri
 
     if let Some(a) = msg.audio_message.as_option() {
         let fallback = json!({ "url": a.url.clone().unwrap_or_default() });
-        put(r, p, "audio", MediaRef::Audio(a), None, fallback).await;
+        put(r, download, p, "audio", MediaRef::Audio(a), None, fallback).await;
     }
     if let Some(d) = msg.document_message.as_option() {
         let fallback = json!({
@@ -323,6 +335,7 @@ async fn media_fields<R: Resolver>(r: &R, msg: &proto::Message, p: &mut Map<Stri
         });
         put(
             r,
+            download,
             p,
             "document",
             MediaRef::Document(d),
@@ -338,6 +351,7 @@ async fn media_fields<R: Resolver>(r: &R, msg: &proto::Message, p: &mut Map<Stri
         });
         put(
             r,
+            download,
             p,
             "image",
             MediaRef::Image(i),
@@ -348,7 +362,16 @@ async fn media_fields<R: Resolver>(r: &R, msg: &proto::Message, p: &mut Map<Stri
     }
     if let Some(s) = msg.sticker_message.as_option() {
         let fallback = json!({ "url": s.url.clone().unwrap_or_default() });
-        put(r, p, "sticker", MediaRef::Sticker(s), None, fallback).await;
+        put(
+            r,
+            download,
+            p,
+            "sticker",
+            MediaRef::Sticker(s),
+            None,
+            fallback,
+        )
+        .await;
     }
     if let Some(v) = msg.video_message.as_option() {
         let fallback = json!({
@@ -357,6 +380,7 @@ async fn media_fields<R: Resolver>(r: &R, msg: &proto::Message, p: &mut Map<Stri
         });
         put(
             r,
+            download,
             p,
             "video",
             MediaRef::Video(v),
@@ -372,6 +396,7 @@ async fn media_fields<R: Resolver>(r: &R, msg: &proto::Message, p: &mut Map<Stri
         });
         put(
             r,
+            download,
             p,
             "video_note",
             MediaRef::Video(v),
@@ -383,6 +408,11 @@ async fn media_fields<R: Resolver>(r: &R, msg: &proto::Message, p: &mut Map<Stri
 }
 
 /// Phone number from the first `TEL` line of a vCard (GOWA `ExtractPhoneFromVCard`).
+/// `status@broadcast` (any device suffix), as GOWA `shouldIgnoreImageDownload`.
+fn is_status(chat: &Jid) -> bool {
+    chat.to_non_ad().to_string() == "status@broadcast"
+}
+
 fn vcard_phone(vcard: &str) -> Option<String> {
     vcard
         .lines()

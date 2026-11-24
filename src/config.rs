@@ -57,6 +57,16 @@ pub struct Config {
     )]
     pub cors_allowed_origins: Vec<String>,
 
+    /// Reverse proxies (IPs or CIDRs) whose `X-Forwarded-Proto`/`-Host`
+    /// headers are honoured when building public URLs (`qr_link`,
+    /// `file_url`). Empty trusts no one, like GOWA/Fiber.
+    #[arg(
+        long = "trusted-proxies",
+        env = "APP_TRUSTED_PROXIES",
+        value_delimiter = ','
+    )]
+    pub trusted_proxies: Vec<String>,
+
     #[arg(long, env = "WHATSAPP_WEBHOOK", value_delimiter = ',')]
     pub webhook: Vec<String>,
 
@@ -90,6 +100,16 @@ pub struct Config {
         action = clap::ArgAction::Set
     )]
     pub webhook_include_outgoing: bool,
+
+    /// Deliver events of a device that has its own webhook to the global
+    /// `WHATSAPP_WEBHOOK` URLs too (default: the device webhook replaces them).
+    #[arg(
+        long = "webhook-device-merge-global",
+        env = "WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub webhook_device_merge_global: bool,
 
     /// Outbound proxy for the WhatsApp socket and media transfers
     /// (`socks5://user:pass@host:1080`, `http://host:8080`, `https://...`).
@@ -172,6 +192,10 @@ pub struct Config {
     #[arg(long = "auto-download-media", env = "WHATSAPP_AUTO_DOWNLOAD_MEDIA", default_value_t = true, action = clap::ArgAction::Set)]
     pub auto_download_media: bool,
 
+    /// Skip auto-download for status (`status@broadcast`) media.
+    #[arg(long = "ignore-status-media", env = "WHATSAPP_IGNORE_STATUS_MEDIA", default_value_t = false, action = clap::ArgAction::Set)]
+    pub ignore_status_media: bool,
+
     #[arg(long = "account-validation", env = "WHATSAPP_ACCOUNT_VALIDATION", default_value_t = true, action = clap::ArgAction::Set)]
     pub account_validation: bool,
 
@@ -249,6 +273,8 @@ pub enum ConfigError {
     /// which would bypass the proxy the operator asked for).
     #[error("invalid WHATSAPP_PROXY: {0}")]
     InvalidProxy(String),
+    #[error("invalid APP_TRUSTED_PROXIES entry {0:?}: expected an IP or CIDR")]
+    InvalidTrustedProxy(String),
 }
 
 impl Config {
@@ -278,9 +304,26 @@ impl Config {
             .map_err(ConfigError::InvalidProxy)
     }
 
+    /// `APP_TRUSTED_PROXIES`: bare IPs become host routes (`/32`, `/128`).
+    /// Unlike Fiber, a malformed entry refuses to start instead of being
+    /// dropped silently.
+    pub fn trusted_proxies(&self) -> Result<Vec<ipnet::IpNet>, ConfigError> {
+        self.trusted_proxies
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.parse::<ipnet::IpNet>()
+                    .or_else(|_| s.parse::<IpAddr>().map(ipnet::IpNet::from))
+                    .map_err(|_| ConfigError::InvalidTrustedProxy(s.to_owned()))
+            })
+            .collect()
+    }
+
     /// GOWA refuses to start unauthenticated on a public bind.
     pub fn validate(&self) -> Result<Vec<Credential>, ConfigError> {
         self.proxy()?;
+        self.trusted_proxies()?;
         let creds = self.credentials()?;
         if creds.is_empty() && !self.host.is_loopback() && !self.allow_unauthenticated {
             return Err(ConfigError::UnauthenticatedPublicBind(self.host));
@@ -482,6 +525,38 @@ mod tests {
         let err = bad.validate().unwrap_err().to_string();
         assert!(err.starts_with("invalid WHATSAPP_PROXY"), "{err}");
         assert!(!err.contains("pw-x9q"), "{err}");
+    }
+
+    #[test]
+    fn trusted_proxies_merge_global_and_status_media() {
+        let c = cfg(&[]);
+        assert_eq!(c.trusted_proxies(), Ok(vec![]));
+        assert!(!c.webhook_device_merge_global);
+        assert!(!c.ignore_status_media);
+
+        let c = cfg(&[
+            "--trusted-proxies",
+            "0.0.0.0/0, 10.1.2.3,,::1",
+            "--webhook-device-merge-global",
+            "true",
+            "--ignore-status-media",
+            "true",
+        ]);
+        let nets: Vec<String> = c
+            .trusted_proxies()
+            .unwrap()
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        assert_eq!(nets, ["0.0.0.0/0", "10.1.2.3/32", "::1/128"]);
+        assert!(c.webhook_device_merge_global);
+        assert!(c.ignore_status_media);
+
+        let bad = cfg(&["--host", "127.0.0.1", "--trusted-proxies", "10.0.0.0/33"]);
+        assert_eq!(
+            bad.validate(),
+            Err(ConfigError::InvalidTrustedProxy("10.0.0.0/33".into()))
+        );
     }
 
     #[test]

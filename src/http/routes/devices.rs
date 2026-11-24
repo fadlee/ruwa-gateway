@@ -4,18 +4,18 @@
 use axum::{
     Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::Response,
     routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::app::public_url;
+use super::app::qr_link;
 use crate::http::extract::Body;
 use crate::{
     error::{ApiError, ApiResult},
-    http::{AppState, response},
+    http::{AppState, forwarded::PublicOrigin, response},
     storage::registry::DeviceWebhook,
     usecase::{self, device as dev},
 };
@@ -142,7 +142,7 @@ async fn remove(State(state): State<AppState>, Path(id): Path<String>) -> ApiRes
 async fn login(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
+    origin: PublicOrigin,
 ) -> ApiResult<Response> {
     let id = id.trim();
     let device = dev::ensure(&state.devices, id).await?;
@@ -151,7 +151,7 @@ async fn login(
         "Login success",
         json!({
             "device_id": id,
-            "qr_link": public_url(&headers, &state.settings.base_path, &qr.image_path),
+            "qr_link": qr_link(&origin, &state, &qr.image_path),
             "qr_duration": qr.duration,
         }),
     ))

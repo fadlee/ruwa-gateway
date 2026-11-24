@@ -49,6 +49,7 @@ async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Har
             os: "Chrome".into(),
             media_dir: dir.path().join("statics/media"),
             auto_download_media: true,
+            ignore_status_media: false,
             auto_reject_call: false,
             auto_mark_read: false,
             auto_reply: String::new(),
@@ -85,6 +86,7 @@ async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Har
             os: "Chrome".into(),
             base_path: base.into(),
             cors_allowed_origins: vec![],
+            trusted_proxies: vec![],
         }),
     };
     Harness {

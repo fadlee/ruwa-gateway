@@ -7,8 +7,13 @@ use crate::{
     config::Config,
     device::{DeviceManager, DeviceOptions, presence::PresenceOptions},
     http::{self, AppState, Settings},
-    storage::Db,
+    storage::{Db, schedule::ScheduleStore},
     ui::{UiAsset, UiConfig},
+    usecase::{
+        schedule::{ScheduleService, Worker},
+        schedule_dispatch::DeviceBackend,
+        send_media::SendSettings,
+    },
     webhook::{Dispatcher, WebhookConfig},
 };
 
@@ -41,7 +46,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             auto_reply: cfg.auto_reply.clone(),
             presence: presence_opts.clone(),
         },
-        db,
+        db.clone(),
         webhook,
     )
     .await?;
@@ -57,7 +62,21 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     });
     ui.start();
 
+    let scheduler =
+        ScheduleService::new(ScheduleStore::new(db), PathBuf::from("storages/scheduled"));
+    Arc::new(Worker::new(
+        scheduler.clone(),
+        DeviceBackend {
+            devices: devices.clone(),
+            settings: SendSettings {
+                account_validation: cfg.account_validation,
+            },
+        },
+    ))
+    .start();
+
     let state = AppState {
+        scheduler,
         ui,
         credentials: Arc::new(credentials),
         devices: devices.clone(),

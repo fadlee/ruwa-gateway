@@ -61,6 +61,10 @@ async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Har
     .unwrap();
     std::fs::write(qr_dir.join("probe.png"), b"png").unwrap();
     let state = AppState {
+        scheduler: ruwa_gateway::usecase::schedule::ScheduleService::new(
+            ruwa_gateway::storage::schedule::ScheduleStore::new(db.clone()),
+            dir.path().join("storages/scheduled"),
+        ),
         ui: ruwa_gateway::ui::UiAsset::new(ruwa_gateway::ui::UiConfig {
             enabled: true,
             auto_update: false,
@@ -1654,4 +1658,226 @@ async fn newsletter_live_updates_contract() {
         body["message"],
         "newsletter_id: no live updates subscription for 1@newsletter."
     );
+}
+
+fn in_secs(secs: i64) -> String {
+    (chrono::Utc::now() + chrono::Duration::seconds(secs))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+#[tokio::test]
+async fn scheduling_a_send_validates_then_stores_without_a_session() {
+    let h = harness().await;
+    let at = in_secs(3600);
+
+    // Schedule fields are checked first, with GOWA's messages.
+    expect_validation(
+        &h,
+        post_json(
+            "/send/message",
+            &format!(r#"{{"phone":"628","message":"x","scheduled_at":"{at}"}}"#),
+        ),
+        "timezone is required for scheduled sends",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json("/send/message", r#"{"phone":"628","message":"x","scheduled_at":"2020-01-01T00:00:00Z","timezone":"UTC"}"#),
+        "scheduled_at must be in the future",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json("/send/message", &format!(r#"{{"phone":"628","message":"x","scheduled_at":"{at}","timezone":"UTC","recurrence":"weekly"}}"#)),
+        "weekdays are required for weekly recurrence",
+    )
+    .await;
+    // Then the payload goes through the normal send validation.
+    expect_validation(
+        &h,
+        post_json(
+            "/send/message",
+            &format!(r#"{{"scheduled_at":"{at}","timezone":"UTC"}}"#),
+        ),
+        "message: cannot be blank; phone: cannot be blank.",
+    )
+    .await;
+    expect_validation(
+        &h,
+        post_json(
+            "/send/chat-presence",
+            &format!(
+                r#"{{"phone":"628","action":"start","scheduled_at":"{at}","timezone":"UTC"}}"#
+            ),
+        ),
+        "chat presence cannot be scheduled",
+    )
+    .await;
+
+    // Valid → stored; no WhatsApp session is needed to schedule.
+    let (status, body) = call(
+        &h.app,
+        post_json(
+            "/send/message",
+            &format!(r#"{{"phone":"+628123","message":"selamat pagi","scheduled_at":"{at}","timezone":"Asia/Jakarta"}}"#),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["message"], "Message scheduled");
+    let id = body["results"]["schedule_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        body["results"]["scheduled_at"],
+        body["results"]["next_run_at"]
+    );
+    assert!(body["results"].get("message_id").is_none());
+
+    let (status, body) = call(&h.app, get(&format!("/send/schedules/{id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["message"], "Schedule fetched");
+    let s = &body["results"];
+    assert_eq!(
+        (s["status"].as_str(), s["message_type"].as_str()),
+        (Some("active"), Some("text"))
+    );
+    assert_eq!(
+        s["phone"], "+628123@s.whatsapp.net",
+        "sanitised like GOWA: the JID suffix is added"
+    );
+    assert_eq!(s["summary"], "selamat pagi");
+    assert_eq!(s["timezone"], "Asia/Jakarta");
+    assert_eq!(s["recurrence"], "once");
+
+    let (_, body) = call(&h.app, get("/send/schedules")).await;
+    assert_eq!(body["message"], "Schedules fetched");
+    assert_eq!(
+        body["results"]["pagination"],
+        serde_json::json!({"limit": 25, "offset": 0, "total": 1})
+    );
+    let (_, body) = call(
+        &h.app,
+        get("/send/schedules?search=selamat&message_type=text&status=active"),
+    )
+    .await;
+    assert_eq!(body["results"]["data"].as_array().unwrap().len(), 1);
+    let (_, body) = call(&h.app, get("/send/schedules?status=paused")).await;
+    assert_eq!(body["results"]["data"], serde_json::json!([]));
+
+    // pause → resume → cancel, with the state rules.
+    let post = |action: &str| {
+        Request::post(format!("/send/schedules/{id}/{action}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let (status, body) = call(&h.app, post("pause")).await;
+    assert_eq!(
+        (status, body["message"].as_str()),
+        (StatusCode::OK, Some("Schedule paused"))
+    );
+    let (status, body) = call(&h.app, post("pause")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["message"],
+        "scheduled send cannot be paused while paused"
+    );
+    let (_, body) = call(&h.app, post("resume")).await;
+    assert_eq!(body["message"], "Schedule resumed");
+    let (_, body) = call(&h.app, post("cancel")).await;
+    assert_eq!(body["message"], "Schedule cancelled");
+    let (status, body) = call(&h.app, post("cancel")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["message"],
+        "scheduled send cannot be cancelled while cancelled"
+    );
+
+    // Unknown ids and bad list filters.
+    let (status, body) = call(&h.app, get("/send/schedules/nope")).await;
+    assert_eq!(
+        (status, body["code"].as_str(), body["message"].as_str()),
+        (
+            StatusCode::NOT_FOUND,
+            Some("NOT_FOUND"),
+            Some("scheduled send not found")
+        )
+    );
+    for (path, msg) in [
+        (
+            "/send/schedules?limit=101",
+            "limit: must be no greater than 100.",
+        ),
+        (
+            "/send/schedules?status=bogus",
+            "status: must be a valid value.",
+        ),
+        (
+            "/send/schedules?message_type=bogus",
+            "message_type: must be a valid value.",
+        ),
+        (
+            "/send/schedules?offset=-1",
+            "offset: must be no less than 0.",
+        ),
+    ] {
+        let (status, body) = call(&h.app, get(path)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(body["message"], msg, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn scheduling_accepts_forms_with_repeated_weekdays_and_uploads() {
+    let h = harness().await;
+    let at = in_secs(3600);
+    let (status, body) = call(
+        &h.app,
+        multipart(
+            "/send/image",
+            &[
+                ("phone", "628123"),
+                ("caption", "weekly"),
+                ("scheduled_at", &at),
+                ("timezone", "UTC"),
+                ("recurrence", "weekly"),
+                ("weekdays", "1"),
+                ("weekdays", "3"),
+                ("occurrence_limit", "4"),
+            ],
+            Some(("image", "a.png", "image/png", b"\x89PNG")),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["results"]["schedule_id"].as_str().unwrap();
+    let (_, body) = call(&h.app, get(&format!("/send/schedules/{id}"))).await;
+    let s = &body["results"];
+    assert_eq!(s["message_type"], "image");
+    assert_eq!(s["summary"], "weekly");
+    assert_eq!(s["weekdays"], serde_json::json!([1, 3]));
+    assert_eq!(s["occurrence_limit"], 4);
+
+    // The upload is held until the schedule ends, and removed on cancel.
+    let stored = h._dir.path().join("storages/scheduled").join(id);
+    assert!(stored.join("image-a.png").is_file());
+    let (status, _) = call(
+        &h.app,
+        Request::post(format!("/send/schedules/{id}/cancel"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!stored.exists());
+
+    // An unsupported upload is refused before anything is stored.
+    expect_validation(
+        &h,
+        multipart(
+            "/send/image",
+            &[("phone", "628"), ("scheduled_at", &at), ("timezone", "UTC")],
+            Some(("image", "a.gif", "image/gif", b"GIF89a")),
+        ),
+        "your image is not allowed. please use jpg/jpeg/png",
+    )
+    .await;
 }

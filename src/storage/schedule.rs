@@ -300,9 +300,10 @@ impl ScheduleStore {
         token: &str,
         message_id: &str,
         poll_secret: Option<Vec<u8>>,
+        now_s: i64,
     ) -> anyhow::Result<bool> {
         let (id, token, message_id) = (id.to_owned(), token.to_owned(), message_id.to_owned());
-        let t = now();
+        let t = now_s;
         self.db
             .run(move |c| {
                 let held = scheduled_sends::table
@@ -416,7 +417,6 @@ impl ScheduleStore {
                     .filter(scheduled_sends::status.eq(RUNNING))
                     .filter(scheduled_sends::lease_token.eq(&token));
                 let current_next: Option<i64> = held
-                    .clone()
                     .select(scheduled_sends::next_run_at)
                     .first(c)
                     .optional()?;
@@ -618,30 +618,26 @@ mod tests {
     async fn pending_message_id_is_pinned_and_dropped_on_a_clean_retry() {
         let s = store();
         s.create(job("a", "d", 100)).await.unwrap();
-        // `set_pending_attempt` checks the lease against the real clock.
-        s.claim_next(150, 9_999_999_999, "t")
-            .await
-            .unwrap()
-            .unwrap();
+        s.claim_next(150, 400, "t").await.unwrap().unwrap();
         assert!(
-            s.set_pending_attempt("a", "t", "3EB0AA", None)
+            s.set_pending_attempt("a", "t", "3EB0AA", None, 160)
                 .await
                 .unwrap()
         );
         assert!(
-            s.set_pending_attempt("a", "t", "3EB0AA", None)
+            s.set_pending_attempt("a", "t", "3EB0AA", None, 160)
                 .await
                 .unwrap(),
             "same id again is fine"
         );
         assert!(
-            !s.set_pending_attempt("a", "t", "OTHER", None)
+            !s.set_pending_attempt("a", "t", "OTHER", None, 160)
                 .await
                 .unwrap(),
             "another id is refused"
         );
         assert!(
-            !s.set_pending_attempt("a", "stale", "3EB0AA", None)
+            !s.set_pending_attempt("a", "stale", "3EB0AA", None, 160)
                 .await
                 .unwrap()
         );

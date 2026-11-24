@@ -9,6 +9,8 @@ pub mod group;
 pub mod message;
 pub mod names;
 pub mod newsletter;
+pub mod schedule;
+pub mod schedule_dispatch;
 pub mod schedule_time;
 pub mod send;
 pub mod send_media;

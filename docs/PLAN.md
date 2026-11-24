@@ -70,7 +70,7 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 - [x] `/newsletter/follow|unfollow|info|messages|messages/{id}/download`
 - [x] `/newsletter/live-updates` (GET/POST/DELETE, renew otomatis) + event `newsletter.message`
 - [ ] `/newsletter/message-updates|directory` + event `newsletter.joined|left|mute` (SDK tak mengeluarkan event-nya)
-- [ ] Scheduler persisten (`scheduled_sends`), `/send/schedules*`, retry dengan message id sama
+- [x] Scheduler persisten (`scheduled_sends`), `/send/schedules*`, retry dengan message id sama (semua `/send/*` kecuali presence; **forward belum**)
 - [x] serve gowa-ui (download release + verifikasi SHA-256) — dikerjakan lebih awal untuk uji manual
 - [x] `/ws` hub
 - [ ] update UI berkala, `APP_UI_ASSET_SHA256`

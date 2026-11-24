@@ -14,7 +14,7 @@ use crate::{
         jid::{self, parse_jid},
         message as msgx, proto,
         sdk::{
-            prelude::{Client, SendError, SendRequest},
+            prelude::{Client, SendError, SendOptions, SendRequest},
             waproto::buffa::MessageField,
         },
     },
@@ -24,7 +24,7 @@ use crate::{
 const VALID_DURATIONS: [i64; 4] = [0, 86_400, 604_800, 7_776_000];
 const EVERYONE: &str = "@everyone";
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct MessageRequest {
     pub phone: String,
@@ -42,6 +42,13 @@ pub struct SendResponse {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub message_id: String,
     pub status: String,
+    /// Set when the request was scheduled instead of sent.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub schedule_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub scheduled_at: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub next_run_at: String,
 }
 
 /// ozzo-validation style `Required` errors: `"a: cannot be blank; b: cannot be blank."`.
@@ -115,8 +122,34 @@ pub fn validate_message(req: &MessageRequest) -> ApiResult<()> {
     validate_mentions(&req.mentions)
 }
 
+/// Identity of the occurrence a scheduled send is attempting, kept across
+/// retries and crashes (GOWA `ContextWithSendMessageID` / `ContextWithPollSecret`).
+#[derive(Debug, Clone)]
+pub struct Pinned {
+    pub message_id: String,
+    pub poll_secret: Option<Vec<u8>>,
+}
+
+tokio::task_local! {
+    /// Set while validating a request that is about to be scheduled: the send
+    /// runs its own validation, then stops at the login check instead of sending.
+    pub(crate) static DRY_RUN: ();
+    /// Set while a scheduled occurrence is dispatched.
+    pub(crate) static PINNED: Pinned;
+}
+
+pub(crate) const DRY_RUN_CODE: &str = "SCHEDULE_DRY_RUN";
+
 /// GOWA `MustLogin`.
 pub(crate) fn must_login(device: &DeviceInstance) -> ApiResult<Arc<Client>> {
+    if DRY_RUN.try_with(|()| ()).is_ok() {
+        // Validation passed; scheduling does not need a live session.
+        return Err(ApiError::new(
+            axum::http::StatusCode::ACCEPTED,
+            DRY_RUN_CODE,
+            "validated",
+        ));
+    }
     let client = device.client().ok_or_else(ApiError::not_connected)?;
     if !client.is_socket_connected() {
         return Err(ApiError::not_connected());
@@ -305,6 +338,7 @@ pub async fn send_text(
             server_time()
         ),
         message_id,
+        ..Default::default()
     })
 }
 
@@ -318,10 +352,13 @@ pub(crate) async fn deliver(
     message: proto::Message,
     text: &str,
 ) -> ApiResult<String> {
-    let sent = client
-        .send(SendRequest::new(recipient, message.clone()))
-        .await
-        .map_err(send_error)?;
+    let mut request = SendRequest::new(recipient, message.clone());
+    if let Ok(pinned) = PINNED.try_with(Clone::clone)
+        && let Ok(id) = crate::wa::sdk::MessageId::new(&pinned.message_id)
+    {
+        request = request.with_options(SendOptions::default().with_message_id(id));
+    }
+    let sent = client.send(request).await.map_err(send_error)?;
     let message_id = sent.message_id.to_string();
     // whatsmeow waits for the server ack, so a nack (463 …) fails the request.
     if let Some(Some(code)) = device.acks.wait(&message_id, ACK_WAIT).await {

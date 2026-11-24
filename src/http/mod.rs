@@ -42,6 +42,7 @@ pub struct AppState {
     pub devices: Arc<DeviceManager>,
     pub settings: Arc<Settings>,
     pub ui: crate::ui::UiAsset,
+    pub scheduler: crate::usecase::schedule::ScheduleService,
 }
 
 /// Builds the full router.

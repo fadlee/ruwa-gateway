@@ -125,7 +125,12 @@ async fn info(State(state): State<AppState>, Path(id): Path<String>) -> ApiResul
 async fn remove(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
     let id = id.trim();
     dev::validate_id(id)?;
+    // Schedules are keyed by the slot id, which `id` may only alias (a JID).
+    let slot = state.devices.find(id).await.map(|d| d.id().to_owned());
     state.devices.remove(id).await?;
+    if let Some(slot) = slot {
+        state.scheduler.delete_device(&slot).await;
+    }
     state.devices.hub().publish(
         "DEVICE_REMOVED",
         format!("Device {id} removed"),

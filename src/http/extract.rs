@@ -13,11 +13,13 @@ use axum::{
 };
 use serde::de::DeserializeOwned;
 
-use crate::{error::ApiError, media::Upload};
+use crate::{error::ApiError, media::Upload, usecase::schedule_time::ScheduleOptions};
 
 pub struct Payload<T> {
     pub value: T,
     pub files: HashMap<String, Upload>,
+    /// `scheduled_at`, `timezone`, … read from the same body (default when absent).
+    pub schedule: ScheduleOptions,
 }
 
 impl<T> Payload<T> {
@@ -43,6 +45,16 @@ where
 
 fn form<T: DeserializeOwned>(body: &str) -> Result<T, ApiError> {
     serde_html_form::from_str(body).map_err(ApiError::internal)
+}
+
+/// Only bodies that mention `scheduled_at` are bound for schedule options, so
+/// other fields never fail a request that is not scheduled.
+fn schedule_from_form(body: &str) -> Result<ScheduleOptions, ApiError> {
+    if body.contains("scheduled_at") {
+        form(body)
+    } else {
+        Ok(ScheduleOptions::default())
+    }
 }
 
 impl<T, S> FromRequest<S> for Payload<T>
@@ -101,22 +113,36 @@ where
             return Ok(Self {
                 value: form(&encoded)?,
                 files,
+                schedule: schedule_from_form(&encoded)?,
             });
         }
 
         let bytes = axum::body::Bytes::from_request(req, state)
             .await
             .map_err(|e| ApiError::internal(e.body_text()))?;
-        let value = if content_type.starts_with("application/x-www-form-urlencoded") {
-            form(&String::from_utf8_lossy(&bytes))?
+        let (value, schedule) = if content_type.starts_with("application/x-www-form-urlencoded") {
+            let text = String::from_utf8_lossy(&bytes);
+            (form(&text)?, schedule_from_form(&text)?)
         } else if bytes.is_empty() {
-            serde_json::from_str("{}").map_err(ApiError::internal)?
+            (
+                serde_json::from_str("{}").map_err(ApiError::internal)?,
+                ScheduleOptions::default(),
+            )
         } else {
-            serde_json::from_slice(&bytes).map_err(ApiError::internal)?
+            let schedule = if bytes.windows(12).any(|w| w == b"scheduled_at") {
+                serde_json::from_slice(&bytes).map_err(ApiError::internal)?
+            } else {
+                ScheduleOptions::default()
+            };
+            (
+                serde_json::from_slice(&bytes).map_err(ApiError::internal)?,
+                schedule,
+            )
         };
         Ok(Self {
             value,
             files: HashMap::new(),
+            schedule,
         })
     }
 }

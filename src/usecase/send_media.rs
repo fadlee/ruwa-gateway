@@ -30,7 +30,7 @@ fn yes() -> bool {
     true
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct ImageRequest {
     pub phone: String,
@@ -66,7 +66,7 @@ impl Default for ImageRequest {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct FileRequest {
     pub phone: String,
@@ -78,7 +78,7 @@ pub struct FileRequest {
     pub mentions: Vec<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct VideoRequest {
     pub phone: String,
@@ -95,7 +95,7 @@ pub struct VideoRequest {
     pub allow_reshare: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct AudioRequest {
     pub phone: String,
@@ -106,7 +106,7 @@ pub struct AudioRequest {
     pub ptt: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct ContactRequest {
     pub phone: String,
@@ -116,7 +116,7 @@ pub struct ContactRequest {
     pub contact_phone: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct LocationRequest {
     pub phone: String,
@@ -126,7 +126,7 @@ pub struct LocationRequest {
     pub longitude: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct LinkRequest {
     pub phone: String,
@@ -310,6 +310,7 @@ pub async fn send_image(
             server_time()
         ),
         message_id,
+        ..Default::default()
     })
 }
 
@@ -381,6 +382,7 @@ pub async fn send_file(
             server_time()
         ),
         message_id,
+        ..Default::default()
     })
 }
 
@@ -499,6 +501,7 @@ pub async fn send_video(
             server_time()
         ),
         message_id,
+        ..Default::default()
     })
 }
 
@@ -591,6 +594,7 @@ pub async fn send_audio(
             server_time()
         ),
         message_id,
+        ..Default::default()
     })
 }
 
@@ -640,6 +644,7 @@ pub async fn send_contact(
             server_time()
         ),
         message_id,
+        ..Default::default()
     })
 }
 
@@ -688,6 +693,7 @@ pub async fn send_location(
             server_time()
         ),
         message_id,
+        ..Default::default()
     })
 }
 
@@ -748,6 +754,7 @@ pub async fn send_link(
             server_time()
         ),
         message_id,
+        ..Default::default()
     })
 }
 
@@ -837,6 +844,7 @@ pub async fn send_presence(
     Ok(SendResponse {
         message_id: "presence".into(),
         status: format!("Send presence success {}", req.kind),
+        ..Default::default()
     })
 }
 
@@ -878,10 +886,11 @@ pub async fn send_chat_presence(
     Ok(SendResponse {
         message_id: message_id.into(),
         status: format!("Send chat presence {verb} typing success {}", req.phone),
+        ..Default::default()
     })
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct StickerRequest {
     pub phone: String,
@@ -1021,10 +1030,14 @@ pub async fn send_sticker(
             server_time()
         )
     };
-    Ok(SendResponse { message_id, status })
+    Ok(SendResponse {
+        message_id,
+        status,
+        ..Default::default()
+    })
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct PollRequest {
     pub phone: String,
@@ -1113,8 +1126,16 @@ fn poll_message(
     } else {
         message.poll_creation_message = MessageField::some(poll);
     }
-    let mut secret = uuid::Uuid::new_v4().as_bytes().to_vec();
-    secret.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    // A scheduled occurrence keeps its secret across retries.
+    let secret = super::send::PINNED
+        .try_with(|p| p.poll_secret.clone())
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            let mut secret = uuid::Uuid::new_v4().as_bytes().to_vec();
+            secret.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+            secret
+        });
     let mut info = proto::MessageContextInfo::default();
     info.message_secret = Some(secret);
     message.message_context_info = MessageField::some(info);
@@ -1146,6 +1167,7 @@ pub async fn send_poll(
             server_time()
         ),
         message_id,
+        ..Default::default()
     })
 }
 

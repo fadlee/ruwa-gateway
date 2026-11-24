@@ -178,6 +178,54 @@ async fn app_info_with_auth() {
 }
 
 #[tokio::test]
+async fn app_metrics_reports_devices_and_system() {
+    let h = harness_with(cred(), "", &["a", "b"]).await;
+    assert_eq!(
+        raw(&h.app, get("/app/metrics")).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, body) = call(&h.app, authed(get("/app/metrics"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["code"], "SUCCESS");
+    assert_eq!(body["message"], "Fetch app metrics success");
+    let r = &body["results"];
+    assert_eq!(r["version"], format!("v{}", env!("CARGO_PKG_VERSION")));
+    assert_eq!(r["session_store"], "sqlite");
+    assert_eq!(
+        r["devices"],
+        serde_json::json!({ "total": 2, "logged_in": 0, "connected": 0 })
+    );
+    let system = &r["system"];
+    assert!(system["uptime_seconds"].is_u64());
+    assert!(system["go_version"].as_str().is_some_and(|v| !v.is_empty()));
+    assert!(system["memory"]["goroutines"].is_u64());
+    assert!(system["folders"]["media"]["bytes"].is_u64());
+    assert!(system["folders"]["storages"]["files"].is_u64());
+    // The volume of the storages folder is always readable on unix.
+    #[cfg(unix)]
+    assert!(system["filesystem"]["free_bytes"].is_u64());
+}
+
+#[tokio::test]
+async fn app_metrics_honours_base_path_and_needs_no_device() {
+    let h = harness_with(cred(), "/gowa", &[]).await;
+    // No device exists and none is requested: still 200.
+    let (status, _) = call(&h.app, authed(get("/gowa/app/metrics"))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call(
+        &h.app,
+        authed(
+            Request::get("/gowa/app/metrics")
+                .header("x-device-id", "nope")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn statics_need_no_auth_and_honour_base_path() {
     let h = harness_with(cred(), "/gowa", &[]).await;
     let (status, body) = raw(&h.app, get("/gowa/statics/qrcode/probe.png")).await;

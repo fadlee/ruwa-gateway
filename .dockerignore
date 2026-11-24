@@ -1,0 +1,10 @@
+target
+.git
+.github
+docs
+storages
+statics/media
+statics/qrcode
+.env
+*.db
+*.db-*

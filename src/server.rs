@@ -96,15 +96,38 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     tracing::info!(%addr, "ruwa-gateway listening");
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown_signal())
         .await?;
 
     for device in devices.list().await {
         device.stop().await;
     }
     Ok(())
+}
+
+/// Resolves on Ctrl-C or, on unix, SIGTERM (what `docker stop` and systemd
+/// send), so devices are stopped cleanly instead of being killed.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+    tracing::info!("shutting down");
 }
 
 fn non_empty(values: &[String]) -> Vec<String> {

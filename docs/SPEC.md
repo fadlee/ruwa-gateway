@@ -137,7 +137,7 @@ Semua response JSON:
 | schedule | `/send/schedules*` + field `scheduled_at` di send | M4 |
 | call | `/call/reject` | M3 |
 | ws/ui | `/ws`, serve gowa-ui di `/` | M4 |
-| app metrics | `/app/metrics` | M4 |
+| app metrics | `/app/metrics` | M4 (selesai) |
 | passkey | `/app/passkey*` | M5 (opsional) |
 | interactive | `/send/interactive` | M5 (eksperimental) |
 | chatwoot, mcp | — | di luar scope v1 |

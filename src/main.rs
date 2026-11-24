@@ -1,8 +1,12 @@
 use clap::Parser;
 use ruwa_gateway::config::{Cli, Command};
 
+#[global_allocator]
+static ALLOC: ruwa_gateway::sysmetrics::CountingAlloc = ruwa_gateway::sysmetrics::CountingAlloc;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    ruwa_gateway::sysmetrics::init();
     let cli = Cli::parse();
     match cli.command {
         Command::Version => {

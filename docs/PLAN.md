@@ -74,8 +74,8 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 - [x] serve gowa-ui (download release + verifikasi SHA-256) — dikerjakan lebih awal untuk uji manual
 - [x] `/ws` hub
 - [ ] update UI berkala, `APP_UI_ASSET_SHA256`
-- [ ] `/app/metrics`
-- [ ] Docker image + release binary (amd64/arm64)
+- [x] `/app/metrics` (`src/sysmetrics.rs`)
+- [x] Docker image + release binary (amd64/arm64): `Dockerfile`, `.github/workflows/ci.yml` + `release.yml` (belum dicoba di GitHub — repo belum punya remote)
 
 ## Fase 5 — Opsional
 

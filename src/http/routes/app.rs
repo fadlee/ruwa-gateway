@@ -18,7 +18,9 @@ use crate::{
 
 /// Routes that need no device (`InitRestAppInfo`).
 pub fn unscoped() -> Router<AppState> {
-    Router::new().route("/app/info", get(info))
+    Router::new()
+        .route("/app/info", get(info))
+        .route("/app/metrics", get(metrics))
 }
 
 /// Device-scoped routes (`InitRestApp`).
@@ -44,6 +46,43 @@ async fn info(State(state): State<AppState>) -> Response {
             "max_image_size": crate::media::MAX_IMAGE_SIZE,
             "chatwoot_enabled": false,
             "scheduled_sends": false,
+        }),
+    )
+}
+
+/// Health of the instance itself (GOWA `AppMetrics`): process/container
+/// memory, disk used by media and storages, and device counts.
+async fn metrics(State(state): State<AppState>) -> Response {
+    let options = state.devices.options();
+    let storages = options
+        .root
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| "storages".into());
+    let system = crate::sysmetrics::snapshot(
+        vec![
+            ("media".to_owned(), options.media_dir.clone()),
+            ("storages".to_owned(), storages.clone()),
+        ],
+        &storages,
+    )
+    .await;
+
+    let (mut total, mut logged_in, mut connected) = (0, 0, 0);
+    for device in state.devices.list().await {
+        total += 1;
+        logged_in += usize::from(device.is_logged_in());
+        connected += usize::from(device.is_connected());
+    }
+
+    response::success(
+        "Fetch app metrics success",
+        json!({
+            "version": format!("v{}", env!("CARGO_PKG_VERSION")),
+            // Only SQLite is supported (docs/PLAN.md Fase 5: Postgres).
+            "session_store": "sqlite",
+            "devices": { "total": total, "logged_in": logged_in, "connected": connected },
+            "system": system,
         }),
     )
 }

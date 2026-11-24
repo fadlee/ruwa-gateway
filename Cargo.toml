@@ -1,11 +1,16 @@
 [package]
 name = "ruwa-gateway"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
 description = "GOWA-compatible WhatsApp REST API built on whatsapp-rust"
 publish = false
+
+[features]
+# Compile SQLite into the binary instead of linking the system libsqlite3.
+# Release binaries and the Docker image use it (static musl build).
+bundled = ["whatsapp-rust/sqlite-storage-bundled"]
 
 [dependencies]
 # WhatsApp protocol. Pinned to a git rev: the 0.7.0 crates.io release enables
@@ -43,8 +48,16 @@ diesel = { version = "2.4", default-features = false, features = ["sqlite"] }
 diesel_migrations = { version = "2.4", default-features = false, features = ["sqlite"] }
 chrono-tz = "0.10.4"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tokio-tungstenite = "0.28"
 futures-util = "0.3"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 4

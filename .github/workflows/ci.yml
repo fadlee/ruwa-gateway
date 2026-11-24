@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages
+        # libsqlite3-dev: the dev build links the system SQLite.
+        # ffmpeg: the media tests exercise real transcoding when it is present.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev ffmpeg
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  musl-build:
+    # The release/Docker build profile: static musl binary with bundled SQLite.
+    # Catches musl-only breakage on PRs instead of at release time.
+    name: static musl build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl
+      - run: cargo build --release --locked --features bundled --target x86_64-unknown-linux-musl
+      - name: Binary is static and runs
+        run: |
+          bin=target/x86_64-unknown-linux-musl/release/ruwa-gateway
+          ! ldd "$bin" 2>/dev/null | grep -q 'libc.so' || { ldd "$bin"; exit 1; }
+          "$bin" version

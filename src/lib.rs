@@ -8,6 +8,7 @@ pub mod http;
 pub mod media;
 pub mod server;
 pub mod storage;
+pub mod sysmetrics;
 pub mod telemetry;
 pub mod ui;
 pub mod usecase;

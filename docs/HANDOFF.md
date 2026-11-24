@@ -7,7 +7,8 @@
 ## Status saat ini
 
 - **Fase aktif**: Fase 4 — **scheduler selesai** (`scheduled_sends`, worker, `/send/schedules*`, semua `/send/*` menerima `scheduled_at` dst.; termasuk forward terjadwal) dan `/newsletter/follow|unfollow|info|messages|messages/{id}/download` selesai + `live-updates` & event `newsletter.message` (sisa: message-updates, directory, event `newsletter.joined|left|mute`). Sebelumnya: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence|poll` selesai; `/user/*`, `/call/reject`, `call.offer` + auto-reject selesai; auto reply + auto mark read selesai; event `presence` + presence on-connect/pulse selesai; semua event webhook Fase 3 + error 463 selesai → **Fase 3 tuntas (kode)**; berikutnya verifikasi live, lalu Fase 4.
-- **Build**: `cargo test` (222 test: 173 unit + 49 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Rilis**: versi crate `0.1.0-rc.1`; `Dockerfile` (+ `.dockerignore`), `.github/workflows/ci.yml` dan `release.yml` ada; image sudah dibangun & di-smoke-test lokal (health, `/app/metrics`, SIGTERM 1 dtk, ffmpeg, uid 10001; 258MB). Workflow **belum pernah jalan di GitHub** sampai tag pre-release pertama di-push.
+- **Build**: `cargo test` (230 test: 179 unit + 51 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -45,12 +46,17 @@
    Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
    `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
    `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
-2. Sisa Fase 4 yang ringan: `/app/metrics`, Docker/release, update UI berkala + `APP_UI_ASSET_SHA256`. Fase 3 tuntas di sisi kode. Verifikasi live (daftar "Belum terverifikasi" di atas), lalu Fase 4 (newsletter, scheduler), auto reply/mark read/reject call.
+2. Sisa Fase 4 yang ringan: update UI berkala + `APP_UI_ASSET_SHA256`. Pantau run pertama `release.yml` (tag `v0.1.0-rc.1`) dan perbaiki bila gagal. Fase 3 tuntas di sisi kode. Verifikasi live (daftar "Belum terverifikasi" di atas), lalu Fase 4 (newsletter, scheduler), auto reply/mark read/reject call.
 
 ## Keputusan yang sudah diambil
 
 | Tanggal | Keputusan | Alasan |
 |---|---|---|
+| 2026-11-24 | Rilis = binary statis musl (`--features bundled`: SQLite tertanam via `whatsapp-rust/sqlite-storage-bundled`) untuk amd64+arm64, dibangun **native** di runner masing-masing (`ubuntu-24.04`, `ubuntu-24.04-arm`); image multi-arch merakit binary itu lewat target Dockerfile `prebuilt` (tanpa kompilasi di bawah QEMU). `docker build .` biasa memakai target `source` (kompilasi di dalam) | build dev tanpa `bundled` menaut `libsqlite3` sistem (dicek `ldd`); QEMU untuk compile arm64 ~jam-an |
+| 2026-11-24 | Tag harus sama dengan `version` di `Cargo.toml` (job `version` menolak bila beda); tag berisi `-` = pre-release (GitHub prerelease, tanpa tag `latest` di GHCR) | cegah binary berlabel salah |
+| 2026-11-24 | Image: alpine + ffmpeg + tini, user uid 10001, `WORKDIR /data` (volume: `storages/` + `statics/` relatif cwd), `HEALTHCHECK` ke `/health` | path data server relatif ke cwd |
+| 2026-11-24 | Server menangani SIGTERM (selain Ctrl-C) → `docker stop` menghentikan device dengan rapi | sebelumnya hanya SIGINT, PID 1 mengabaikan SIGTERM |
+| 2026-11-24 | `/app/metrics` mempertahankan semua key GOWA; arti di Rust: `go_version` = versi rustc, `heap_alloc_bytes` = byte hidup dari `CountingAlloc` (global allocator di `main.rs`), `runtime_sys_bytes` = `VmSize`, `goroutines` = task tokio hidup, `gc_cycles` = 0; `session_store` selalu `sqlite`; `started_at` diinisialisasi di awal `main` | klien (gowa-ui) membaca key GOWA; Rust tak punya GC |
 | 2026-11-24 | Scheduler: validasi payload memakai **jalur kirim yang sama** dengan mode "dry run" (`DRY_RUN` task-local; `must_login` mengembalikan penanda `SCHEDULE_DRY_RUN` setelah validasi lolos) | satu sumber validasi dengan kirim langsung; tanpa menduplikasi `ValidateSend*` GOWA |
 | 2026-11-24 | Identitas occurrence di-pin lewat `PINNED` task-local (`message_id` + poll secret) dan `deliver` memakai `SendOptions::with_message_id` | retry/pemulihan crash tidak membuat pesan kedua (GOWA `ContextWithSendMessageID`) |
 | 2026-11-24 | Media jadwal disimpan di `storages/scheduled/<id>/`, bukan `statics/media/scheduled/` | GOWA menaruhnya di folder yang disajikan publik lewat `/statics` |
@@ -96,6 +102,9 @@
 
 ## Catatan / jebakan
 
+- `/app/metrics` (`src/sysmetrics.rs`): folder `media` (= `statics/media`) dan `storages` dijalankan walk di `spawn_blocking` dan di-cache 1 menit **tanpa memedulikan** daftar folder (seperti GOWA); symlink dihitung ukuran dirinya, tak diikuti. Nilai `null` bila tak tersedia (non-Linux, limit cgroup `max`). Envelope kita tak punya field `status` (hanya `code`/`message`/`results`, sama untuk semua endpoint). Clippy `unnecessary_cast` di `statvfs` di-allow demi portabilitas tipe.
+- CI memakai toolchain `1.97` (sama dengan `rust:1.97-alpine`); naikkan keduanya bersamaan. CI memakai `clippy -D warnings`. Job `musl-build` di CI membangun profil rilis agar kerusakan musl ketahuan di PR. Build Docker dari nol ~12 menit.
+- `ubuntu-24.04-arm` gratis hanya untuk repo publik; repo privat butuh runner arm berbayar atau ganti ke QEMU.
 - Scheduler (`usecase/schedule.rs`, `schedule_time.rs`, `schedule_dispatch.rs`, `storage/schedule.rs`): worker tiap 5 dtk (`Worker<Backend>`; `DeviceBackend` untuk produksi, backend palsu untuk test) — pulihkan lease kedaluwarsa (120 dtk; occurrence yang sudah di-pin dikenai 1 percobaan), lalu klaim satu per satu job `active` yang jatuh tempo. Percobaan maks 10; retry `15 dtk · 2^percobaan` (tanpa kenaikan, jadi 15, 30, 60 … maks 5 mnt); device offline → coba lagi 30 dtk **tanpa** biaya percobaan; validasi/payload rusak → `failed` langsung; kehabisan percobaan → job berulang **melewati** occurrence itu (slot berikut, jatah baru), job sekali jalan `failed`; `end_at` lewat → `completed` tanpa kirim. `resume`: job sekali jalan yang terlambat dikirim segera, job berulang lanjut di slot berikut (id pin lama dibuang) atau `completed`. Beda dari GOWA: kolom `legacy_attempt_unknown` tidak ada (tak ada baris lama); `/send/chat-presence` dengan field jadwal → 400 `chat presence cannot be scheduled`; `send/presence` tak dijadwalkan. `deliver` kini menunggu ack ≤5 dtk (lihat catatan nack) sehingga satu occurrence bisa lebih lama — masih jauh di bawah batas 120 dtk. Hapus device (`DELETE /devices/{id}`) menghapus jadwal & medianya; media yatim dibersihkan saat start. `phone` jadwal tersimpan seperti GOWA setelah `sanitize_phone` (`+62…@s.whatsapp.net`).
 - Forward terjadwal: `ForwardRequest` kini membawa `message_id` (diisi dari path, menimpa body) agar payload tersimpan mandiri; `validate_scheduled_forward` (wajib `message_id`/`phone`, nomor, `duration`, pesan ada di storage device → kalau tidak **400** `message with ID X not found`, bukan 500 seperti forward langsung; tipe tak didukung → 400) dijalankan saat membuat **dan** saat jatuh tempo (sumber terhapus → `failed` permanen). Cek jadwal (`timezone`, dst.) dijalankan sebelum cek storage. Summary `Forwarded message`.
 - Belum di scheduler: wake-up segera saat job baru jatuh tempo (worker polling 5 dtk), metrik.
@@ -164,6 +173,10 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — Fase 4: `/app/metrics`, rilis (Docker + GitHub Actions)
+- `src/sysmetrics.rs` (+`build.rs` untuk versi rustc), route `/app/metrics` (tanpa device, di balik auth), SIGTERM, feature `bundled`, profil release (thin LTO, strip), `Dockerfile`, `.dockerignore`, `ci.yml`, `release.yml`, README (bagian Docker/Rilis). Versi → `0.1.0-rc.1`.
+- Test: 6 unit `sysmetrics`, HTTP `app_metrics_reports_devices_and_system`, `app_metrics_honours_base_path_and_needs_no_device`. Docker: build dari source sukses, smoke test OK. Belum diuji: workflow di GitHub, image arm64.
 
 ### 2026-11-24 — Fase 4: forward terjadwal
 - `message::validate_scheduled_forward`, `ForwardRequest` (+`message_id`, `Clone`, `Serialize`), handler forward memakai `Payload` dan `routes::send::schedule`, arm `"forward"` di `DeviceBackend`, `send::dry_run_ok`. Test: HTTP `forward_can_be_scheduled_after_the_storage_checks`, unit round-trip payload forward. Belum diuji dengan akun live.

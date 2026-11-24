@@ -6,6 +6,7 @@
 
 pub mod chat;
 pub mod registry;
+pub mod schedule;
 
 use std::sync::{Arc, Mutex};
 

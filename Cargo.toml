@@ -41,6 +41,7 @@ infer = "0.19"
 tempfile = "3"
 diesel = { version = "2.4", default-features = false, features = ["sqlite"] }
 diesel_migrations = { version = "2.4", default-features = false, features = ["sqlite"] }
+chrono-tz = "0.10.4"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -1881,3 +1881,74 @@ async fn scheduling_accepts_forms_with_repeated_weekdays_and_uploads() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn forward_can_be_scheduled_after_the_storage_checks() {
+    use ruwa_gateway::storage::chat::{ChatStore, Message};
+    let h = harness().await;
+    seed_chats(&h).await;
+    ChatStore::new(h.db.clone())
+        .store_message(Message {
+            id: "C1".into(),
+            chat_jid: "628222@s.whatsapp.net".into(),
+            device_id: "default".into(),
+            sender: "628222@s.whatsapp.net".into(),
+            content: "Contact: Bob (62)".into(),
+            timestamp: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let at = in_secs(3600);
+    let forward = |id: &str, extra: &str| {
+        post_json(
+            &format!("/message/{id}/forward"),
+            &format!(r#"{{"phone":"628333","scheduled_at":"{at}","timezone":"UTC"{extra}}}"#),
+        )
+    };
+
+    // Unlike an immediate forward, a missing source is a 400 here.
+    expect_validation(&h, forward("NOPE", ""), "message with ID NOPE not found").await;
+    expect_validation(
+        &h,
+        forward("C1", ""),
+        "unsupported message type for forward",
+    )
+    .await;
+    expect_validation(
+        &h,
+        forward("M1", r#","duration":5"#),
+        "duration must be one of: 0 (no expiry), 86400 (24h), 604800 (7d), 7776000 (90d)",
+    )
+    .await;
+    // Schedule fields are checked before the message is looked up.
+    expect_validation(
+        &h,
+        post_json(
+            "/message/NOPE/forward",
+            &format!(r#"{{"phone":"628333","scheduled_at":"{at}"}}"#),
+        ),
+        "timezone is required for scheduled sends",
+    )
+    .await;
+
+    let (status, body) = call(&h.app, forward("M1", r#","force_reupload":true"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["message"], "Message scheduled");
+    let id = body["results"]["schedule_id"].as_str().unwrap();
+    let (_, body) = call(&h.app, get(&format!("/send/schedules/{id}"))).await;
+    let s = &body["results"];
+    assert_eq!(s["message_type"], "forward");
+    assert_eq!(s["summary"], "Forwarded message");
+    assert_eq!(s["status"], "active");
+    let (_, body) = call(&h.app, get("/send/schedules?message_type=forward")).await;
+    assert_eq!(body["results"]["pagination"]["total"], 1);
+
+    // Without schedule fields it is still an immediate forward.
+    let (status, _) = call(
+        &h.app,
+        post_json("/message/M1/forward", r#"{"phone":"628333"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

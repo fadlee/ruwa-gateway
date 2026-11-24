@@ -171,6 +171,29 @@ j $B/group -d "{\"title\":\"Uji ruwa\",\"participants\":[\"$PB\"]}"
 
 ---
 
+## 10. Scheduler (`scheduled_at` + `/send/schedules*`)
+
+Pakai waktu dekat (mis. +2 menit). Tanpa `timezone` request ditolak. Worker memeriksa tiap 5 dtk.
+
+```sh
+AT=$(date -u -d '+2 minutes' +%Y-%m-%dT%H:%M:%SZ)
+j $B/send/message -d "{\"phone\":\"$PB\",\"message\":\"terjadwal\",\"scheduled_at\":\"$AT\",\"timezone\":\"Asia/Jakarta\"}"
+j "$B/send/schedules?status=active"
+```
+
+- [ ] Respons `Message scheduled` + `schedule_id`; `GET /send/schedules/{id}` status `active`; pesan **sampai di HP B** sekitar `scheduled_at`, status jadi `completed`, `last_message_id` terisi, `occurrence_count: 1`.
+- [ ] Jadwal bisa dibuat saat akun **belum login** (disimpan), lalu terkirim setelah pair/online (log `device is offline` → retry 30 dtk tanpa menambah `attempts`).
+- [ ] `recurrence:"daily"` + `occurrence_limit:2` (atur `scheduled_at` dekat; setelah pesan pertama `next_run_at` = besok jam yang sama; status `completed` setelah ke-2 — boleh dicek dengan mengedit jam sistem atau cukup lihat `next_run_at`).
+- [ ] `weekly` dengan `weekdays` (form: ulang `-F weekdays=1 -F weekdays=3`), `monthly` dengan `day_of_month` (31 → hari terakhir bulan pendek).
+- [ ] **Gambar/dokumen terjadwal** (multipart): berkas tersimpan di `storages/scheduled/<id>/`, terkirim, lalu folder hilang saat `completed`/`cancelled`.
+- [ ] `poll`, `sticker`, `contact`, `location`, `link` terjadwal terkirim sesuai jenisnya.
+- [ ] **Forward terjadwal**: `POST /message/{id}/forward` dengan `scheduled_at`; id tak ada → 400; terkirim sesuai jadwal.
+- [ ] `pause` → tidak terkirim saat jatuh tempo; `resume` (job sekali jalan yang terlambat langsung terkirim; berulang lanjut slot berikut); `cancel` menghapus media.
+- [ ] **Anti-duplikat**: matikan server tepat setelah job `running`/sebelum jatuh tempo, nyalakan lagi → terkirim **sekali** (cek `GET /chat/.../messages` hanya satu salinan; log `execution interrupted before completion` bila terpotong).
+- [ ] Hapus device (`DELETE /devices/{id}`) menghapus jadwalnya.
+
+---
+
 ## Temuan
 
 Salin tabel ini ke HANDOFF (bagian "Catatan / jebakan") setelah sesi uji.

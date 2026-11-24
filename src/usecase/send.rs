@@ -140,15 +140,16 @@ tokio::task_local! {
 
 pub(crate) const DRY_RUN_CODE: &str = "SCHEDULE_DRY_RUN";
 
+/// What a dry run reports once validation has passed.
+pub(crate) fn dry_run_ok() -> ApiError {
+    ApiError::new(axum::http::StatusCode::ACCEPTED, DRY_RUN_CODE, "validated")
+}
+
 /// GOWA `MustLogin`.
 pub(crate) fn must_login(device: &DeviceInstance) -> ApiResult<Arc<Client>> {
     if DRY_RUN.try_with(|()| ()).is_ok() {
         // Validation passed; scheduling does not need a live session.
-        return Err(ApiError::new(
-            axum::http::StatusCode::ACCEPTED,
-            DRY_RUN_CODE,
-            "validated",
-        ));
+        return Err(dry_run_ok());
     }
     let client = device.client().ok_or_else(ApiError::not_connected)?;
     if !client.is_socket_connected() {

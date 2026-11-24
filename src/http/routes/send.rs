@@ -75,7 +75,7 @@ fn ok(res: SendResponse) -> Response {
 /// Scheduled request: check the schedule fields, then validate the payload
 /// with the real send path (it stops at the login check), then store it.
 #[allow(clippy::too_many_arguments)]
-async fn schedule<T, F>(
+pub(super) async fn schedule<T, F>(
     state: &AppState,
     device: &DeviceInstance,
     kind: &str,

@@ -605,9 +605,12 @@ const FORWARDABLE_MEDIA: [&str; 7] = [
 ];
 const UNSUPPORTED_FORWARD: &str = "unsupported message type for forward";
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ForwardRequest {
+    /// Set from the path (GOWA `request.MessageID = c.Params("message_id")`);
+    /// kept so a scheduled forward can be sent later from its payload alone.
+    pub message_id: String,
     pub phone: String,
     pub duration: Option<i64>,
     pub force_reupload: bool,
@@ -615,6 +618,32 @@ pub struct ForwardRequest {
 
 fn is_forward_media(m: &Message) -> bool {
     FORWARDABLE_MEDIA.contains(&m.media_type.as_str())
+}
+
+/// Checks run before a forward is scheduled and again when it falls due
+/// (GOWA `validateScheduledForward`): a forward that can never be sent is
+/// rejected now, and one whose source was deleted meanwhile fails for good.
+pub async fn validate_scheduled_forward(
+    device: &DeviceInstance,
+    req: &ForwardRequest,
+) -> ApiResult<()> {
+    use super::send::{validate_duration, validate_phone_number};
+
+    require(&[("message_id", &req.message_id), ("phone", &req.phone)])?;
+    validate_phone_number(&req.phone)?;
+    validate_duration(req.duration)?;
+    let message = device
+        .chats()
+        .get_message(&device.storage_partition(), &req.message_id)
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to load message {}: {e}", req.message_id)))?
+        .ok_or_else(|| {
+            ApiError::validation(format!("message with ID {} not found", req.message_id))
+        })?;
+    if !is_forwardable(&message) {
+        return Err(ApiError::validation(UNSUPPORTED_FORWARD));
+    }
+    Ok(())
 }
 
 /// GOWA `IsForwardableStorageMessage`: media, or plain text that is not a

@@ -6,6 +6,7 @@ use std::{sync::Arc, time::Duration};
 use serde::de::DeserializeOwned;
 
 use super::{
+    message::{self, ForwardRequest},
     schedule::{Backend, Failure, load_asset},
     send::{self, MessageRequest, PINNED, Pinned},
     send_media::{
@@ -102,6 +103,15 @@ async fn run(
         "link" => sm::send_link(d, payload::<LinkRequest>(&job)?, settings).await,
         "location" => sm::send_location(d, payload::<LocationRequest>(&job)?, settings).await,
         "poll" => sm::send_poll(d, payload::<PollRequest>(&job)?, settings).await,
+        "forward" => {
+            let req = payload::<ForwardRequest>(&job)?;
+            // The source may have been deleted since: permanent, not transient.
+            message::validate_scheduled_forward(d, &req).await?;
+            let id = req.message_id.clone();
+            return message::forward(d, &id, req, settings.account_validation)
+                .await
+                .map(|r| r.message_id);
+        }
         other => {
             return Err(ApiError::validation(format!(
                 "invalid scheduled payload: unsupported scheduled message type {other:?}"
@@ -175,6 +185,27 @@ mod tests {
             classify(ApiError::internal("boom")),
             Failure::Transient(_)
         ));
+    }
+
+    #[test]
+    fn a_forward_payload_round_trips_with_its_message_id() {
+        let req = ForwardRequest {
+            message_id: "3EB0AA".into(),
+            phone: "628@s.whatsapp.net".into(),
+            duration: Some(86_400),
+            force_reupload: true,
+        };
+        let back: ForwardRequest =
+            serde_json::from_value(serde_json::to_value(&req).unwrap()).unwrap();
+        assert_eq!(
+            (
+                back.message_id.as_str(),
+                back.phone.as_str(),
+                back.duration,
+                back.force_reupload
+            ),
+            ("3EB0AA", "628@s.whatsapp.net", Some(86_400), true)
+        );
     }
 
     #[test]

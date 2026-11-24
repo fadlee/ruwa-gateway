@@ -13,10 +13,16 @@ use axum::{
 
 use crate::{
     error::ApiResult,
-    http::{AppState, device_scope::Device, extract::Body, response},
+    http::{
+        AppState,
+        device_scope::Device,
+        extract::{Body, Payload},
+        response,
+    },
     usecase::message::{
         self, ForwardRequest, GenericResponse, PhoneRequest, ReactionRequest, UpdateRequest,
     },
+    wa::jid,
 };
 
 pub fn router() -> Router<AppState> {
@@ -138,8 +144,31 @@ async fn forward(
     State(state): State<AppState>,
     Extension(Device(device)): Extension<Device>,
     Path(id): Path<String>,
-    Body(req): Body<ForwardRequest>,
+    body: Payload<ForwardRequest>,
 ) -> ApiResult<Response> {
+    let (mut req, opts) = (body.value, body.schedule);
+    req.message_id = id.clone();
+    if opts.is_scheduled() {
+        req.phone = jid::sanitize_phone(&req.phone);
+        // Create-time checks (storage first, like GOWA), then store; the
+        // validation stops at a dry-run marker instead of sending.
+        let check = async {
+            message::validate_scheduled_forward(&device, &req).await?;
+            Err(crate::usecase::send::dry_run_ok())
+        };
+        return super::send::schedule(
+            &state,
+            &device,
+            "forward",
+            &req.phone,
+            "Forwarded message",
+            &opts,
+            &req,
+            check,
+            vec![],
+        )
+        .await;
+    }
     Ok(ok(
         message::forward(&device, &id, req, validation(&state)).await?
     ))

@@ -165,6 +165,33 @@ pub struct Config {
     )]
     pub ui_asset_name: String,
 
+    /// How often the dashboard release is re-checked (Go duration, jittered ±10%).
+    #[arg(
+        long = "ui-update-interval",
+        env = "APP_UI_UPDATE_INTERVAL",
+        default_value = "3h",
+        value_parser = parse_go_duration
+    )]
+    pub ui_update_interval: std::time::Duration,
+
+    /// Optional token for the GitHub API calls (rate limits, private mirrors).
+    #[arg(
+        long = "ui-github-token",
+        env = "APP_UI_GITHUB_TOKEN",
+        default_value = ""
+    )]
+    pub ui_github_token: String,
+
+    /// Optional supply-chain pin: refuse any dashboard whose SHA-256 differs
+    /// (hex; each gowa-ui release ships a `gowa-ui.html.sha256` asset).
+    #[arg(
+        long = "ui-asset-sha256",
+        env = "APP_UI_ASSET_SHA256",
+        default_value = "",
+        value_parser = parse_sha256_pin
+    )]
+    pub ui_asset_sha256: String,
+
     /// Only SQLite is supported in v1.
     #[arg(
         long = "db-uri",
@@ -226,6 +253,22 @@ impl Config {
     }
 }
 
+/// `APP_UI_ASSET_SHA256`: empty (no pin) or 64 hex digits, optionally prefixed
+/// `sha256:`; returned lowercase.
+pub fn parse_sha256_pin(raw: &str) -> Result<String, String> {
+    let value = raw.trim();
+    let value = value.strip_prefix("sha256:").unwrap_or(value);
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    if value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(value.to_ascii_lowercase());
+    }
+    Err(format!(
+        "invalid SHA-256 pin {raw:?}: expected 64 hex digits"
+    ))
+}
+
 /// Go `time.ParseDuration` subset: a sequence of `<number><unit>` with units
 /// `h`, `m`, `s`, `ms`. Zero or negative is rejected (GOWA ignores it and
 /// keeps its default; refusing it is clearer).
@@ -265,6 +308,20 @@ pub fn parse_go_duration(raw: &str) -> Result<std::time::Duration, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sha256_pin_is_empty_or_64_hex() {
+        let hex = "AB".repeat(32);
+        assert_eq!(parse_sha256_pin(""), Ok(String::new()));
+        assert_eq!(parse_sha256_pin("  "), Ok(String::new()));
+        assert_eq!(parse_sha256_pin(&hex), Ok(hex.to_lowercase()));
+        assert_eq!(
+            parse_sha256_pin(&format!("sha256:{hex}")),
+            Ok(hex.to_lowercase())
+        );
+        assert!(parse_sha256_pin("abc").is_err());
+        assert!(parse_sha256_pin(&"g".repeat(64)).is_err());
+    }
 
     fn cfg(args: &[&str]) -> Config {
         let mut full = vec!["ruwa-gateway", "rest"];

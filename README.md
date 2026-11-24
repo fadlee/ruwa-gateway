@@ -27,6 +27,8 @@ docker run -d --name ruwa -p 3000:3000 -v ruwa-data:/data \
 - `/data` menyimpan sesi (`storages/`) dan media (`statics/`); pakai volume bernama agar kepemilikan
   (uid 10001) benar.
 - Server menolak start di host non-loopback tanpa `APP_BASIC_AUTH` (atau `APP_ALLOW_UNAUTHENTICATED=true`).
+- Dashboard gowa-ui diunduh di latar belakang dan dicoba ulang otomatis bila jaringan belum siap; atur lewat
+  `APP_UI_UPDATE_INTERVAL` (default `3h`), `APP_UI_GITHUB_TOKEN`, dan `APP_UI_ASSET_SHA256` (pin build).
 - Image berisi ffmpeg (video, voice note, sticker). Healthcheck memakai `GET /health`.
 - Build sendiri dari source: `docker build -t ruwa-gateway .`
 

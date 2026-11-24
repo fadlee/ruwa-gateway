@@ -73,7 +73,7 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 - [x] Scheduler persisten (`scheduled_sends`), `/send/schedules*`, retry dengan message id sama (semua `/send/*` kecuali presence, plus `/message/{id}/forward`)
 - [x] serve gowa-ui (download release + verifikasi SHA-256) — dikerjakan lebih awal untuk uji manual
 - [x] `/ws` hub
-- [ ] update UI berkala, `APP_UI_ASSET_SHA256`
+- [x] update UI berkala (retry + backoff), `APP_UI_UPDATE_INTERVAL`, `APP_UI_GITHUB_TOKEN`, `APP_UI_ASSET_SHA256`
 - [x] `/app/metrics` (`src/sysmetrics.rs`)
 - [x] Docker image + release binary (amd64/arm64): `Dockerfile`, `.github/workflows/ci.yml` + `release.yml` (belum dicoba di GitHub — repo belum punya remote)
 

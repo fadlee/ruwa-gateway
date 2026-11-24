@@ -7,8 +7,8 @@
 ## Status saat ini
 
 - **Fase aktif**: Fase 4 — **scheduler selesai** (`scheduled_sends`, worker, `/send/schedules*`, semua `/send/*` menerima `scheduled_at` dst.; termasuk forward terjadwal) dan `/newsletter/follow|unfollow|info|messages|messages/{id}/download` selesai + `live-updates` & event `newsletter.message` (sisa: message-updates, directory, event `newsletter.joined|left|mute`). Sebelumnya: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence|poll` selesai; `/user/*`, `/call/reject`, `call.offer` + auto-reject selesai; auto reply + auto mark read selesai; event `presence` + presence on-connect/pulse selesai; semua event webhook Fase 3 + error 463 selesai → **Fase 3 tuntas (kode)**; berikutnya verifikasi live, lalu Fase 4.
-- **Rilis**: versi crate `0.1.0-rc.1`; `Dockerfile` (+ `.dockerignore`), `.github/workflows/ci.yml` dan `release.yml` ada; image sudah dibangun & di-smoke-test lokal (health, `/app/metrics`, SIGTERM 1 dtk, ffmpeg, uid 10001; 258MB). Workflow **belum pernah jalan di GitHub** sampai tag pre-release pertama di-push.
-- **Build**: `cargo test` (230 test: 179 unit + 51 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Rilis**: versi crate `0.1.0-rc.2` (rc.1 sudah dirilis dan workflow terbukti hijau di GitHub: CI, tarball amd64+arm64, image GHCR); `Dockerfile` (+ `.dockerignore`), `.github/workflows/ci.yml` dan `release.yml` ada; image sudah dibangun & di-smoke-test lokal (health, `/app/metrics`, SIGTERM 1 dtk, ffmpeg, uid 10001; 258MB). Image arm64 belum pernah dijalankan.
+- **Build**: `cargo test` (239 test: 188 unit + 51 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -46,12 +46,14 @@
    Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
    `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
    `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
-2. Sisa Fase 4 yang ringan: update UI berkala + `APP_UI_ASSET_SHA256`. Pantau run pertama `release.yml` (tag `v0.1.0-rc.1`) dan perbaiki bila gagal. Fase 3 tuntas di sisi kode. Verifikasi live (daftar "Belum terverifikasi" di atas), lalu Fase 4 (newsletter, scheduler), auto reply/mark read/reject call.
+2. Fase 4 tinggal newsletter `message-updates|directory` + event `newsletter.joined|left|mute` (lihat catatan newsletter). Rilis stabil: naikkan `version` ke `0.1.0` lalu push tag `v0.1.0`. Fase 3 tuntas di sisi kode. Verifikasi live (daftar "Belum terverifikasi" di atas), lalu Fase 4 (newsletter, scheduler), auto reply/mark read/reject call.
 
 ## Keputusan yang sudah diambil
 
 | Tanggal | Keputusan | Alasan |
 |---|---|---|
+| 2026-11-24 | Update gowa-ui jalan sebagai loop: cek pertama saat start; gagal → ulang 30 dtk, ×2, maks 30 mnt (dan tak melebihi interval); sukses → tiap `APP_UI_UPDATE_INTERVAL` (3h) ±10%. Log gagal memakai rantai error penuh (`{error:#}`) + URL | sebelumnya sekali coba saat start, kegagalan sesaat = tak ada dashboard sampai restart, dan pesan error tak menyebut penyebab |
+| 2026-11-24 | `APP_UI_ASSET_SHA256` (tolak digest rilis/unduhan/cache yang beda; menerima awalan `sha256:`, huruf besar), `APP_UI_GITHUB_TOKEN` (bearer ke API + unduhan) | sama dengan GOWA `uiasset`; tanpa ETag kondisional (cukup bandingkan digest sebelum mengunduh) |
 | 2026-11-24 | Rilis = binary statis musl (`--features bundled`: SQLite tertanam via `whatsapp-rust/sqlite-storage-bundled`) untuk amd64+arm64, dibangun **native** di runner masing-masing (`ubuntu-24.04`, `ubuntu-24.04-arm`); image multi-arch merakit binary itu lewat target Dockerfile `prebuilt` (tanpa kompilasi di bawah QEMU). `docker build .` biasa memakai target `source` (kompilasi di dalam) | build dev tanpa `bundled` menaut `libsqlite3` sistem (dicek `ldd`); QEMU untuk compile arm64 ~jam-an |
 | 2026-11-24 | Tag harus sama dengan `version` di `Cargo.toml` (job `version` menolak bila beda); tag berisi `-` = pre-release (GitHub prerelease, tanpa tag `latest` di GHCR) | cegah binary berlabel salah |
 | 2026-11-24 | Image: alpine + ffmpeg + tini, user uid 10001, `WORKDIR /data` (volume: `storages/` + `statics/` relatif cwd), `HEALTHCHECK` ke `/health` | path data server relatif ke cwd |
@@ -173,6 +175,10 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — Update gowa-ui berkala + retry (rc.2)
+- `src/ui.rs`: `update_loop` (retry/backoff, jitter), `Outcome`, pin SHA-256, token, `api_base` (untuk test), `{error:#}`; `config.rs`: `APP_UI_UPDATE_INTERVAL|GITHUB_TOKEN|ASSET_SHA256` + `parse_sha256_pin`. Pemicu: container user mencetak `dashboard update failed … error sending request` (jaringan, tak ada retry).
+- Test: 8 unit `ui::tests` (GitHub palsu lewat axum: unduh+cache+up-to-date, digest salah, pin sebelum/sesudah unduh, token, cache melanggar pin, rantai error, backoff, jitter) + `sha256_pin_is_empty_or_64_hex`. Loop `update_loop` sendiri tak punya test (bagian murninya ya).
 
 ### 2026-11-24 — Fase 4: `/app/metrics`, rilis (Docker + GitHub Actions)
 - `src/sysmetrics.rs` (+`build.rs` untuk versi rustc), route `/app/metrics` (tanpa device, di balik auth), SIGTERM, feature `bundled`, profil release (thin LTO, strip), `Dockerfile`, `.dockerignore`, `ci.yml`, `release.yml`, README (bagian Docker/Rilis). Versi → `0.1.0-rc.1`.

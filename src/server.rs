@@ -58,6 +58,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         auto_update: cfg.ui_auto_update,
         repo: cfg.ui_repo.clone(),
         asset_name: cfg.ui_asset_name.clone(),
+        update_interval: cfg.ui_update_interval,
+        github_token: cfg.ui_github_token.clone(),
+        pinned_sha256: cfg.ui_asset_sha256.clone(),
+        api_base: "https://api.github.com".into(),
         cache_dir: PathBuf::from("storages/ui"),
     });
     ui.start();

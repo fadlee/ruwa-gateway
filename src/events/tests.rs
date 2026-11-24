@@ -829,3 +829,63 @@ fn newsletter_message_event() {
     );
     assert_eq!(bare["payload"]["messages"], json!([{"server_id": 7}]));
 }
+
+#[test]
+fn rfc3339_in_zone_matches_go() {
+    assert_eq!(
+        rfc3339_in(1_700_000_000, chrono_tz::UTC),
+        "2023-11-14T22:13:20Z"
+    );
+    assert_eq!(
+        rfc3339_in(1_700_000_000, chrono_tz::Asia::Jakarta),
+        "2023-11-15T05:13:20+07:00"
+    );
+    // Half-hour offset and DST.
+    assert_eq!(
+        rfc3339_in(1_700_000_000, chrono_tz::Asia::Kolkata),
+        "2023-11-15T03:43:20+05:30"
+    );
+    assert_eq!(
+        rfc3339_in(1_690_000_000, chrono_tz::Europe::Paris),
+        "2023-07-22T06:26:40+02:00"
+    );
+    // A zero-offset zone still prints `Z`, like Go.
+    assert_eq!(
+        rfc3339_in(1_700_000_000, chrono_tz::Europe::London),
+        "2023-11-14T22:13:20Z"
+    );
+}
+
+/// `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING`: an API-sent text yields the same
+/// `message` payload as a phone-sent one (`is_from_me`, our own `from`).
+#[tokio::test]
+async fn api_sent_message_payload() {
+    let r = FakeResolver::new(&[]);
+    let m = crate::usecase::send::sent_view(
+        "3EB0AAAA",
+        &jid("628987654321@s.whatsapp.net"),
+        jid("628111111111@s.whatsapp.net"),
+        "Me".into(),
+        secs("2023-10-15T10:30:00Z"),
+        msgx::conversation("sent from the API"),
+    );
+    let phone = IncomingMessage {
+        is_from_me: true,
+        ..incoming(
+            "3EB0AAAA",
+            "628987654321@s.whatsapp.net",
+            "628111111111@s.whatsapp.net",
+            "Me",
+            "2023-10-15T10:30:00Z",
+            msgx::conversation("sent from the API"),
+        )
+    };
+    let actual = message_envelope(&r, &m, "628111111111@s.whatsapp.net").await;
+    let expected = message_envelope(&r, &phone, "628111111111@s.whatsapp.net").await;
+    assert_eq!(actual, expected);
+    assert_eq!(actual["event"], "message");
+    assert_eq!(actual["payload"]["is_from_me"], true);
+    assert_eq!(actual["payload"]["from"], "628111111111@s.whatsapp.net");
+    assert_eq!(actual["payload"]["chat_id"], "628987654321@s.whatsapp.net");
+    assert_eq!(actual["payload"]["body"], "sent from the API");
+}

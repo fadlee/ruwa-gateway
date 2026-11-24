@@ -26,7 +26,14 @@ use crate::{
 
 pub(crate) struct Job {
     pub device: Arc<DeviceInstance>,
-    pub event: Arc<Event>,
+    pub kind: JobKind,
+}
+
+pub(crate) enum JobKind {
+    /// An event from the device's `Bot`.
+    Event(Arc<Event>),
+    /// A message this process sent (`WHATSAPP_WEBHOOK_INCLUDE_OUTGOING`).
+    Sent(Box<IncomingMessage>),
 }
 
 /// Registered on each `Bot`; forwards the events we care about.
@@ -100,9 +107,31 @@ pub(super) async fn run(
     media: MediaSettings,
     hub: Hub,
 ) {
-    while let Some(Job { device, event }) = rx.recv().await {
-        handle(&device, &event, &webhook, &media, &hub).await;
+    while let Some(Job { device, kind }) = rx.recv().await {
+        match kind {
+            JobKind::Event(event) => handle(&device, &event, &webhook, &media, &hub).await,
+            JobKind::Sent(m) => sent_message(&device, &m, &webhook, &media).await,
+        }
     }
+}
+
+/// `message` webhook for a message sent through the API. WhatsApp does not
+/// echo those back (only phone-sent ones arrive as `is_from_me` events), so
+/// the payload is built from what was sent, the same way.
+async fn sent_message(
+    device: &Arc<DeviceInstance>,
+    m: &IncomingMessage,
+    webhook: &Dispatcher,
+    media: &MediaSettings,
+) {
+    let Some(client) = device.client() else {
+        return;
+    };
+    let resolver = ClientResolver::new(client, media.clone(), device);
+    let (name, payload) = events::message_payload(&resolver, m).await;
+    let mut env = events::envelope(name, &device.jid().unwrap_or_default(), payload);
+    add_session_id(device, &mut env);
+    webhook.send(name, env, &device.webhook());
 }
 
 async fn handle(

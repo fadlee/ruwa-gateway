@@ -19,6 +19,15 @@ use crate::{
 
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let credentials = cfg.validate()?;
+    crate::events::set_app_timezone(cfg.timezone);
+    let proxy = match cfg.proxy()? {
+        Some(url) => {
+            let proxy = crate::wa::proxy::Proxy::new(url)?;
+            tracing::info!(proxy = %proxy.url(), "applied outbound proxy from WHATSAPP_PROXY");
+            Some(Arc::new(proxy))
+        }
+        None => None,
+    };
 
     let webhook = Dispatcher::new(WebhookConfig {
         urls: non_empty(&cfg.webhook),
@@ -45,6 +54,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             auto_mark_read: cfg.auto_mark_read,
             auto_reply: cfg.auto_reply.clone(),
             presence: presence_opts.clone(),
+            proxy,
+            include_outgoing: cfg.webhook_include_outgoing,
         },
         db.clone(),
         webhook,

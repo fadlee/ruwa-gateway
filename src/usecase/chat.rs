@@ -19,12 +19,13 @@ use crate::{
 const VALID_TIMERS: [u32; 4] = [0, 86_400, 604_800, 7_776_000];
 const MAX_HISTORY_COUNT: i64 = 500;
 
-/// GOWA `formatTimestamp` (UTC). Unix 0 stands for Go's zero time.
+/// GOWA `formatTimestamp`: RFC 3339 in `APP_TIMEZONE`. Unix 0 stands for
+/// Go's zero time, which keeps its UTC form.
 pub fn format_ts(secs: i64) -> String {
     if secs == 0 {
         return "0001-01-01T00:00:00Z".to_owned();
     }
-    crate::events::rfc3339(secs)
+    crate::events::app_rfc3339(secs)
 }
 
 /// ozzo-validation struct errors: `"a: msg; b: msg."`, keys sorted.

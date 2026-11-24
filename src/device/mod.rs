@@ -59,6 +59,10 @@ pub struct DeviceOptions {
     /// `WHATSAPP_AUTO_REPLY` text; empty disables it.
     pub auto_reply: String,
     pub presence: presence::PresenceOptions,
+    /// `WHATSAPP_PROXY`: socket and media transfers go through it.
+    pub proxy: Option<Arc<crate::wa::proxy::Proxy>>,
+    /// `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING`.
+    pub include_outgoing: bool,
 }
 
 pub struct DeviceManager {
@@ -150,12 +154,17 @@ impl DeviceManager {
 
     async fn attach(&self, record: &DeviceRecord) -> Arc<DeviceInstance> {
         let dir = self.opts.root.join(&record.storage_key);
-        let instance = Arc::new(DeviceInstance::new(
-            record,
-            dir,
-            self.registry.clone(),
-            self.chats.clone(),
-        ));
+        let outbox = self.opts.include_outgoing.then(|| self.events.clone());
+        let instance = Arc::new_cyclic(|me| {
+            DeviceInstance::new(
+                record,
+                dir,
+                self.registry.clone(),
+                self.chats.clone(),
+                outbox,
+                me.clone(),
+            )
+        });
         self.devices
             .write()
             .await

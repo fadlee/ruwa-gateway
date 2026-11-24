@@ -14,8 +14,9 @@ use tokio::sync::{Mutex, watch};
 
 use super::{
     DeviceManager,
-    processor::{Job, Relay},
+    processor::{Job, JobKind, Relay},
 };
+use crate::events::IncomingMessage;
 use crate::storage::{
     chat::ChatStore,
     registry::{DeviceRecord, DeviceWebhook, Registry},
@@ -69,6 +70,10 @@ pub struct DeviceInstance {
     pub acks: super::acks::AckBook,
     /// Newsletter live-updates subscriptions (in memory).
     pub live_updates: super::live_updates::LiveUpdates,
+    /// Processor queue for API-sent messages; set only with
+    /// `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING`.
+    outbox: Option<tokio::sync::mpsc::UnboundedSender<Job>>,
+    me: std::sync::Weak<DeviceInstance>,
 }
 
 impl DeviceInstance {
@@ -77,6 +82,8 @@ impl DeviceInstance {
         dir: PathBuf,
         registry: Registry,
         chats: ChatStore,
+        outbox: Option<tokio::sync::mpsc::UnboundedSender<Job>>,
+        me: std::sync::Weak<DeviceInstance>,
     ) -> Self {
         let jid = Some(record.jid.clone()).filter(|j| !j.is_empty());
         Self {
@@ -98,6 +105,8 @@ impl DeviceInstance {
             seen_groups: StdMutex::new(HashSet::new()),
             acks: Default::default(),
             live_updates: Default::default(),
+            outbox,
+            me,
         }
     }
 
@@ -210,6 +219,11 @@ impl DeviceInstance {
         if let Some(options) = pair {
             builder = builder.with_pair_code(options);
         }
+        if let Some(proxy) = &manager.options().proxy {
+            builder = builder
+                .with_transport_factory(proxy.transport())
+                .with_http_client_arc(proxy.http_client());
+        }
         let bot = builder.build().await?;
         let handle = bot.spawn();
         *self.client.write().expect("client lock") = Some(handle.client());
@@ -262,7 +276,23 @@ impl DeviceInstance {
     pub(super) fn job(self: &Arc<Self>, event: Arc<sdk::prelude::Event>) -> Job {
         Job {
             device: self.clone(),
-            event,
+            kind: JobKind::Event(event),
+        }
+    }
+
+    /// Whether API-sent messages go to the `message` webhook.
+    pub fn reports_sent(&self) -> bool {
+        self.outbox.is_some()
+    }
+
+    /// Queue an API-sent message for the `message` webhook
+    /// (`WHATSAPP_WEBHOOK_INCLUDE_OUTGOING`); a no-op when it is off.
+    pub fn report_sent(&self, message: IncomingMessage) {
+        if let (Some(tx), Some(device)) = (&self.outbox, self.me.upgrade()) {
+            let _ = tx.send(Job {
+                device,
+                kind: JobKind::Sent(Box::new(message)),
+            });
         }
     }
 }

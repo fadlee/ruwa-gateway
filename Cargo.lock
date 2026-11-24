@@ -2283,6 +2283,8 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "ureq",
+ "url",
  "uuid",
  "whatsapp-rust",
 ]

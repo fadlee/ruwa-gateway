@@ -140,7 +140,7 @@ fn message_value(m: &NewsletterMessage) -> Value {
     if m.timestamp > 0 {
         v.insert(
             "timestamp".into(),
-            crate::events::rfc3339(m.timestamp as i64).into(),
+            super::chat::format_ts(m.timestamp as i64).into(),
         );
     }
     v.insert("views_count".into(), json!(m.views_count.unwrap_or(0)));
@@ -313,8 +313,8 @@ fn status_value(s: &crate::device::live_updates::Status) -> Value {
     let mut v = json!({
         "newsletter_id": s.newsletter,
         "duration_seconds": s.duration_secs,
-        "expires_at": crate::events::rfc3339(s.expires_at),
-        "renewed_at": crate::events::rfc3339(s.renewed_at),
+        "expires_at": super::chat::format_ts(s.expires_at),
+        "renewed_at": super::chat::format_ts(s.renewed_at),
     });
     if !s.last_error.is_empty() {
         v["last_error"] = s.last_error.clone().into();

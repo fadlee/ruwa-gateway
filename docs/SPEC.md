@@ -229,10 +229,21 @@ sendiri + diesel postgres untuk registry.
 | — | `APP_ALLOW_UNAUTHENTICATED` | `false` |
 | `--base-path` | `APP_BASE_PATH` | — |
 | `--cors-allowed-origins` | `APP_CORS_ALLOWED_ORIGINS` | — |
+| `--timezone` | `APP_TIMEZONE` | `UTC` (zona IANA untuk timestamp respons REST chat/pesan/newsletter; webhook & storage tetap UTC; nama tak dikenal → gagal start) |
+| `--ui-enabled`, `--ui-auto-update` | `APP_UI_ENABLED`, `APP_UI_AUTO_UPDATE` | `true` |
+| `--ui-repo`, `--ui-asset-name` | `APP_UI_REPO`, `APP_UI_ASSET_NAME` | `aldinokemal/gowa-ui`, `gowa-ui.html` |
+| `--ui-update-interval` | `APP_UI_UPDATE_INTERVAL` | `3h` |
+| `--ui-github-token`, `--ui-asset-sha256` | `APP_UI_GITHUB_TOKEN`, `APP_UI_ASSET_SHA256` | — |
 | `--webhook` | `WHATSAPP_WEBHOOK` | — |
 | `--webhook-secret` | `WHATSAPP_WEBHOOK_SECRET` | `secret` |
 | `--webhook-events` | `WHATSAPP_WEBHOOK_EVENTS` | semua |
 | `--webhook-ignore-jids` | `WHATSAPP_WEBHOOK_IGNORE_JIDS` | — |
+| `--webhook-insecure-skip-verify` | `WHATSAPP_WEBHOOK_INSECURE_SKIP_VERIFY` | `false` |
+| `--webhook-include-outgoing` | `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING` | `false` (`true` = webhook `message` juga untuk pesan yang dikirim lewat API; di GOWA env ini hanya ada di `.env.example`, tidak dibaca kode) |
+| `--whatsapp-proxy` | `WHATSAPP_PROXY` | — (`socks5://`/`socks5h://`/`http://`/`https://`, boleh `user:pass@`; untuk WebSocket + upload/unduh media; URL dari user tetap langsung; URL tak valid → gagal start) |
+| `--presence-on-connect` | `WHATSAPP_PRESENCE_ON_CONNECT` | `unavailable` |
+| `--presence-pulse-enabled` | `WHATSAPP_PRESENCE_PULSE_ENABLED` | `true` |
+| `--presence-pulse-interval`, `--presence-pulse-duration` | `WHATSAPP_PRESENCE_PULSE_INTERVAL`, `..._DURATION` | `24h`, `5m` |
 | `--auto-reply` | `WHATSAPP_AUTO_REPLY` | — |
 | `--auto-mark-read` | `WHATSAPP_AUTO_MARK_READ` | `false` |
 | `--auto-reject-call` | `WHATSAPP_AUTO_REJECT_CALL` | `false` |

@@ -6,13 +6,20 @@
 
 ## Status saat ini
 
-- **Fase aktif**: Fase 4 — **scheduler selesai** (`scheduled_sends`, worker, `/send/schedules*`, semua `/send/*` menerima `scheduled_at` dst.; termasuk forward terjadwal) dan `/newsletter/follow|unfollow|info|messages|messages/{id}/download` selesai + `live-updates` & event `newsletter.message` (sisa: message-updates, directory, event `newsletter.joined|left|mute`). Sebelumnya: Fase 3 — chat storage, `/chats`, `/chat/{jid}/*`, `/message/{id}/*`, `/group/*`, `/user/my/groups|privacy|contacts[/detailed]`, `/user/pushname|avatar|presence/subscribe` selesai; event grup `group.participants|info|joined` selesai; `/send/sticker|presence|chat-presence|poll` selesai; `/user/*`, `/call/reject`, `call.offer` + auto-reject selesai; auto reply + auto mark read selesai; event `presence` + presence on-connect/pulse selesai; semua event webhook Fase 3 + error 463 selesai → **Fase 3 tuntas (kode)**; berikutnya verifikasi live, lalu Fase 4.
+- **Fase aktif**: Fase 4 hampir tuntas di sisi kode. Cakupan vs snapshot GOWA: 87/99 path OpenAPI ada; yang belum:
+  Chatwoot (6, di luar scope v1), passkey (3) + `/send/interactive` (Fase 5), `/newsletter/directory|message-updates`.
+  Webhook: semua event ada kecuali `newsletter.joined|left|mute` (SDK tak punya event-nya).
+  Fase 1–3 tuntas (kode); Fase 4: scheduler, newsletter (follow/unfollow/info/messages/download/live-updates +
+  `newsletter.message`), gowa-ui, `/ws`, `/app/metrics`, Docker/rilis selesai.
+- **Config GOWA (2026-11-24)**: `WHATSAPP_PROXY`, `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING`, `APP_TIMEZONE` selesai.
+  Sisa env yang belum: lihat "Perbedaan perilaku" dan checklist di PLAN.md.
 - **Rilis**: versi crate `0.1.0-rc.2` (rc.1 sudah dirilis dan workflow terbukti hijau di GitHub: CI, tarball amd64+arm64, image GHCR); `Dockerfile` (+ `.dockerignore`), `.github/workflows/ci.yml` dan `release.yml` ada; image sudah dibangun & di-smoke-test lokal (health, `/app/metrics`, SIGTERM 1 dtk, ffmpeg, uid 10001; 258MB). Image arm64 belum pernah dijalankan.
-- **Build**: `cargo test` (239 test: 188 unit + 51 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Build**: `cargo test` (250 test: 199 unit + 51 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
-  gowa-ui terunduh & dirender, indikator `/ws` hijau di headless Chrome.
+  gowa-ui terunduh & dirender, indikator `/ws` hijau di headless Chrome; **handshake + QR lewat `WHATSAPP_PROXY`**
+  (proxy HTTP CONNECT ber-auth dan SOCKS5 ber-auth lokal, 2026-11-24 — log proxy: `web.whatsapp.com:443`, kredensial disensor di log server).
 - **Belum terverifikasi live**: kirim media (upload ke CDN WhatsApp), webhook pesan masuk/media/receipt/presence,
   auto-download, `/user/*`, logout dari HP (`device.logged_out`), temp ban, **chat storage** (history sync setelah
   pair, pesan masuk/keluar tersimpan, reply setelah restart), `/chat/{jid}/pin|archive|disappearing|history`
@@ -24,34 +31,27 @@
 
 ## Langkah berikutnya
 
-0. **Jalankan [MANUAL-TEST.md](MANUAL-TEST.md)** (checklist verifikasi live, 9 bagian) sebelum Fase 4; salin temuan ke "Catatan / jebakan".
-1. **Uji manual M1+M2 lewat gowa-ui** (paling mudah): `APP_HOST=127.0.0.1 cargo run -- rest` dari direktori kerja
-   terpisah, buka `http://localhost:3000/` → kartu device → **Pair** → scan QR dari HP. Lalu menu **Messaging**
-   untuk kirim teks/gambar/file/audio/video/kontak/lokasi/link, **Add device** untuk multi-device.
-   Halaman Channels/sebagian Account akan error (endpoint Fase 3–4); Chats dan Groups kini tersedia. **User sudah berhasil pair 2 akun dan kirim pesan lewat UI (2026-11-23).**
-   Alternatif lewat curl (butuh HP dengan akun test):
-   ```sh
-   # terminal 1: penerima webhook (atau https://webhook.site)
-   python3 -m http.server 9000
-   # terminal 2 (jalankan dari direktori kerja terpisah; server menulis storages/ & statics/ di cwd)
-   APP_HOST=127.0.0.1 WHATSAPP_WEBHOOK=http://127.0.0.1:9000/hook cargo run -- rest
-   curl localhost:3000/app/login                      # buka qr_link, scan dari HP
-   curl localhost:3000/app/status                     # is_logged_in: true
-   curl -XPOST localhost:3000/send/message -H 'content-type: application/json' \
-        -d '{"phone":"62xxx","message":"halo dari ruwa"}'
-   curl -XPOST localhost:3000/send/image -F phone=62xxx -F caption=tes -F image=@foto.jpg
-   curl -XPOST localhost:3000/send/audio -F phone=62xxx -F ptt=true -F audio=@suara.mp3
-   curl "localhost:3000/user/check?phone=62xxx"
-   ```
-   Cek: pesan/media sampai di HP; balasan teks & gambar dari HP → webhook `message` (gambar tersimpan di
-   `statics/media/`); receipt → `message.ack`; restart → session pulih; device kedua via
-   `POST /devices` + `GET /devices/{id}/login`; unlink dari HP → `device.logged_out`.
-2. Fase 4 tinggal newsletter `message-updates|directory` + event `newsletter.joined|left|mute` (lihat catatan newsletter). Rilis stabil: naikkan `version` ke `0.1.0` lalu push tag `v0.1.0`. Fase 3 tuntas di sisi kode. Verifikasi live (daftar "Belum terverifikasi" di atas), lalu Fase 4 (newsletter, scheduler), auto reply/mark read/reject call.
+1. **Jalankan [MANUAL-TEST.md](MANUAL-TEST.md)** (checklist verifikasi live, 9 bagian, butuh 2 akun test); salin temuan ke
+   "Catatan / jebakan". Risiko terbesar saat ini: hampir semua fitur di luar pair + kirim teks belum pernah dicoba
+   ke WhatsApp sungguhan (daftar "Belum terverifikasi live" di atas). Cara paling mudah lewat gowa-ui:
+   `APP_HOST=127.0.0.1 cargo run -- rest` dari direktori kerja terpisah (server menulis `storages/` & `statics/` di cwd),
+   buka `http://localhost:3000/`. Tambahan untuk fitur baru: kirim lewat API dengan
+   `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING=true` → webhook `message` `is_from_me:true`; `WHATSAPP_PROXY` ke proxy sungguhan
+   lalu kirim media (upload CDN lewat proxy); `APP_TIMEZONE=Asia/Jakarta` → `GET /chats` ber-offset `+07:00`.
+2. Bandingkan JSON `/group/info` dengan output GOWA asli (ditulis dari ingatan struct whatsmeow).
+3. Sisa Fase 4: newsletter `message-updates|directory` + event `newsletter.joined|left|mute` (lihat catatan newsletter).
+4. Env GOWA berikutnya yang paling berguna: `APP_TRUSTED_PROXIES` (`file_url` https di balik reverse proxy).
+5. Rilis stabil: naikkan `version` ke `0.1.0` lalu push tag `v0.1.0`.
 
 ## Keputusan yang sudah diambil
 
 | Tanggal | Keputusan | Alasan |
 |---|---|---|
+| 2026-11-24 | `WHATSAPP_PROXY` diimplementasikan di sisi kita: `StreamDialer` sendiri (SOCKS5 RFC 1928/1929, HTTP/HTTPS `CONNECT`) dipasang via `TokioWebSocketTransportFactory::with_dialer`, plus `UreqHttpClient::with_agent` (ureq `socks-proxy`) untuk media/version fetch, satu klien dibagi semua bot | whatsapp-rust tak punya proxy bawaan; whatsmeow `SetProxyAddress` juga mencakup media. URL dari user (media, link preview) tetap langsung, seperti GOWA |
+| 2026-11-24 | `WHATSAPP_PROXY` tak valid → **gagal start** (GOWA: log error lalu konek langsung); divalidasi di `Config::validate`, bukan `value_parser` clap | konek langsung diam-diam membocorkan trafik yang mestinya lewat proxy; clap mencetak nilai mentah (berisi password) di pesan error |
+| 2026-11-24 | SOCKS5 selalu mengirim nama host (DNS di proxy), `socks5` = `socks5h`; ureq diberi `socks5h://` | perilaku Go `x/net/proxy`; DNS lokal bisa diracuni di jaringan DPI |
+| 2026-11-24 | `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING=true` = webhook `message` juga untuk pesan yang dikirim lewat API (`deliver`); default `false` = perilaku GOWA | di GOWA env ini hanya ada di `.env.example`, tak dibaca kode; WhatsApp sudah meng-echo pesan dari HP (`is_from_me`), jadi satu-satunya arti yang tak mengubah default adalah pesan kiriman API |
+| 2026-11-24 | `APP_TIMEZONE` global (`OnceLock`, `events::app_rfc3339`) dipakai `chat::format_ts` (chats, messages, reactions, anchor history) + timestamp newsletter; webhook, storage, jadwal tetap UTC; kosong = UTC, `Local`/nama tak dikenal → gagal start | sama dengan GOWA `config.AppLocation` + `formatTimestamp` |
 | 2026-11-24 | Update gowa-ui jalan sebagai loop: cek pertama saat start; gagal → ulang 30 dtk, ×2, maks 30 mnt (dan tak melebihi interval); sukses → tiap `APP_UI_UPDATE_INTERVAL` (3h) ±10%. Log gagal memakai rantai error penuh (`{error:#}`) + URL | sebelumnya sekali coba saat start, kegagalan sesaat = tak ada dashboard sampai restart, dan pesan error tak menyebut penyebab |
 | 2026-11-24 | `APP_UI_ASSET_SHA256` (tolak digest rilis/unduhan/cache yang beda; menerima awalan `sha256:`, huruf besar), `APP_UI_GITHUB_TOKEN` (bearer ke API + unduhan) | sama dengan GOWA `uiasset`; tanpa ETag kondisional (cukup bandingkan digest sebelum mengunduh) |
 | 2026-11-24 | Rilis = binary statis musl (`--features bundled`: SQLite tertanam via `whatsapp-rust/sqlite-storage-bundled`) untuk amd64+arm64, dibangun **native** di runner masing-masing (`ubuntu-24.04`, `ubuntu-24.04-arm`); image multi-arch merakit binary itu lewat target Dockerfile `prebuilt` (tanpa kompilasi di bawah QEMU). `docker build .` biasa memakai target `source` (kompilasi di dalam) | build dev tanpa `bundled` menaut `libsqlite3` sistem (dicek `ldd`); QEMU untuk compile arm64 ~jam-an |
@@ -90,7 +90,7 @@
 | 2026-11-23 | Tabel `contacts` sendiri (migrasi `000003`) sebagai pengganti contact store whatsmeow | whatsapp-rust tidak menyimpan kontak, hanya event `ContactUpdate`; GOWA memakai contact store untuk nama chat & sender |
 | 2026-11-23 | Kebijakan nama di `usecase/names.rs` (fungsi murni) dipakai `/chats`, `/chat/*/messages`, dan `sender_display_name` webhook | satu sumber, port `ChatDisplayNameResolver` + `SenderDisplayNameResolver` |
 | 2026-11-23 | Endpoint `/chat/*`: body gagal bind → 400 `BAD_REQUEST` `Invalid request body`; query tak valid → default | perilaku handler GOWA `ui/rest/chat.go` + Fiber `Query[T]` (beda dengan `/send/*`) |
-| 2026-11-23 | Timestamp response chat = RFC3339 UTC; unix 0 → `0001-01-01T00:00:00Z` | GOWA `formatTimestamp` (zero time); `APP_TIMEZONE` belum didukung |
+| 2026-11-23 | Timestamp response chat = RFC3339 (zona `APP_TIMEZONE`, default UTC, sejak 2026-11-24); unix 0 → `0001-01-01T00:00:00Z` | GOWA `formatTimestamp` (zero time tetap UTC) |
 | 2026-11-23 | `/message/*/delete` & `star`: `from_me`/author diambil dari salinan tersimpan, heuristik GOWA (id > 22 char = bukan dari saya) hanya bila tidak tersimpan | heuristik GOWA salah untuk id pendek dari klien lain; index app-state mengikuti whatsapp-rust (WA Web) |
 | 2026-11-23 | Read/played receipt 1:1 tanpa `participant` | API whatsapp-rust (`sender` hanya untuk grup); whatsmeow juga mengabaikan sender di DM |
 | 2026-11-23 | `/group/participants/{add,remove,promote,demote}`: error per peserta selain 403+`add_request` dilaporkan `status:"error"` (`Action failed (code N)`) | GOWA melaporkan semua itu `success` (menyesatkan); kasus 403 tetap persis GOWA |
@@ -104,6 +104,17 @@
 
 ## Catatan / jebakan
 
+- `WHATSAPP_PROXY` (`src/wa/proxy.rs`): skema `socks5`/`socks5h`/`http`/`https`, port default 1080/80/443, `user:pass@` di-percent-decode
+  (SOCKS5 maks 255 byte). Log & `Debug` hanya menampilkan `skema://***@host:port`. Yang lewat proxy: WebSocket WhatsApp +
+  semua HTTP SDK (upload/unduh media, version fetch). Yang **tidak**: unduh URL dari request user, link preview, update gowa-ui,
+  webhook (sama dengan GOWA untuk dua yang pertama). Proxy HTTPS: TLS ke proxy memakai `default_tls_connector` SDK
+  (webpki roots), lalu TLS kedua ke WhatsApp di dalam tunnel. Upload media lewat proxy belum diuji dengan akun.
+- `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING`: dikirim dari `usecase::send::deliver` (semua `/send/*`, forward, jadwal) setelah ack
+  server & simpan; nack tidak dikirim. Tidak mencakup reaction/revoke/edit/auto-reply (tak lewat `deliver`). Job `Sent` masuk
+  antrean processor yang sama, payload dari `events::message_payload` (sama persis dengan pesan `is_from_me` dari HP; ada test).
+  Media kiriman API ikut auto-download (diunduh ulang dari CDN) bila `WHATSAPP_AUTO_DOWNLOAD_MEDIA` aktif. Karena job baru
+  diantrekan setelah ack (≤5 dtk), receipt `message.ack` bisa saja tiba sebelum webhook `message`-nya.
+
 - `/app/metrics` (`src/sysmetrics.rs`): folder `media` (= `statics/media`) dan `storages` dijalankan walk di `spawn_blocking` dan di-cache 1 menit **tanpa memedulikan** daftar folder (seperti GOWA); symlink dihitung ukuran dirinya, tak diikuti. Nilai `null` bila tak tersedia (non-Linux, limit cgroup `max`). Envelope kita tak punya field `status` (hanya `code`/`message`/`results`, sama untuk semua endpoint). Clippy `unnecessary_cast` di `statvfs` di-allow demi portabilitas tipe.
 - CI memakai toolchain `1.97` (sama dengan `rust:1.97-alpine`); naikkan keduanya bersamaan. CI memakai `clippy -D warnings`. Job `musl-build` di CI membangun profil rilis agar kerusakan musl ketahuan di PR. Build Docker dari nol ~12 menit.
 - `ubuntu-24.04-arm` gratis hanya untuk repo publik; repo privat butuh runner arm berbayar atau ganti ke QEMU.
@@ -112,13 +123,13 @@
 - Belum di scheduler: wake-up segera saat job baru jatuh tempo (worker polling 5 dtk), metrik.
 - `cargo test`/`clippy` penuh bisa gagal `ld … signal 9` (kehabisan memori); pakai `-j 1`. Kompilasi ulang `-j 1` ~4–8 menit — jalankan di latar belakang.
 - Newsletter live-updates (`device/live_updates.rs`): langganan di memori per device (hilang saat restart), diperpanjang di 80% durasi grant (min 5 dtk), gagal → backoff 30s×2 maks 5m dan tak melewati kedaluwarsa; `Connected` memicu renew semua; logout/hapus device (`wipe_session`) menghentikan semua; akun slot berganti → langganan dihapus. `GET` selalu array terurut; `DELETE` tanpa langganan → 400 `no live updates subscription for …`. Beda dari GOWA: tak ada penanda "pending" saat subscribe bersamaan unsubscribe. Event `newsletter.message`: hanya counter (`server_id`, `forwards_count>0`, `reaction_counts`); `views_count`/`message_id`/`type`/`timestamp` tak ada di event SDK; timestamp = waktu proses. **Event `newsletter.joined|left|mute` tidak dikirim** — SDK tidak punya event-nya (whatsmeow `NewsletterJoin/Leave/MuteChange`); bisa ditiru hanya untuk aksi lewat API, tapi tidak untuk aksi dari HP.
-- Newsletter: `follow`/`unfollow` = `newsletter().join/leave`; `info` lewat id atau `invite` (awalan `https://whatsapp.com/channel/` dibuang); `messages` = `get_messages(count, before)`; `download` mengambil 1 pesan (`before = server_id+1`) lalu `client.download` — **belum pasti** SDK mengunduh media saluran tanpa `media_key` (plaintext) dengan benar, uji live. `file_url` selalu ada (path `statics/...`). Validasi: `newsletter_id` wajib + harus berakhiran `@newsletter` (unfollow hanya wajib), `count` 1–100 (default 50), `before` ≥ 0, int query tak valid → 500 (Fiber). Belum ada: `message-updates` (SDK tak punya IQ-nya; perlu IQ sendiri), `directory` (query WA Web tak terdokumentasi), `live-updates` (+ renew 90 dtk) dan event `newsletter.*`. Fallback info tanpa viewer metadata (405 untuk saluran yang tak diikuti) belum ada — bergantung perilaku `get_metadata`. `status` pesan `/send/*` ke saluran masih upload biasa.
+- Newsletter: `follow`/`unfollow` = `newsletter().join/leave`; `info` lewat id atau `invite` (awalan `https://whatsapp.com/channel/` dibuang); `messages` = `get_messages(count, before)`; `download` mengambil 1 pesan (`before = server_id+1`) lalu `client.download` — **belum pasti** SDK mengunduh media saluran tanpa `media_key` (plaintext) dengan benar, uji live. `file_url` selalu ada (path `statics/...`). Validasi: `newsletter_id` wajib + harus berakhiran `@newsletter` (unfollow hanya wajib), `count` 1–100 (default 50), `before` ≥ 0, int query tak valid → 500 (Fiber). Belum ada: `message-updates` (SDK tak punya IQ-nya; perlu IQ sendiri), `directory` (query WA Web tak terdokumentasi) dan event `newsletter.joined|left|mute` (live-updates + `newsletter.message` sudah ada, lihat catatan di atas). Fallback info tanpa viewer metadata (405 untuk saluran yang tak diikuti) belum ada — bergantung perilaku `get_metadata`. `status` pesan `/send/*` ke saluran masih upload biasa.
 - Nack kirim (463 dst.): whatsapp-rust kembali dari `send` sebelum server menjawab; jawabannya datang sebagai `Event::ServerAck` (`class=message`, `error=Some(code)`). `device/acks.rs` (`AckBook`, 512 id terakhir per device) menyimpannya dan `usecase::send::deliver` menunggu verdict id-nya **maks 5 dtk** (whatsmeow menunggu ack penuh): `463` → 429 `WA_REACHOUT_TIMELOCK` (teks GOWA), kode lain → 500 `server returned error N`; nack → pesan **tidak** disimpan. Tanpa ack dalam 5 dtk → dianggap sukses. Efek samping: tiap kirim kini menunggu ack (biasanya ratusan ms). Ack juga membawa timestamp server (belum dipakai untuk `status` kirim — gap lama).
 - `device.reachout_timelock`: `ends_at` dari `time_enforcement_ends` (detik unix, string), dikirim juga ke WS `DEVICE_REACHOUT_TIMELOCK`.
 - Label: `label.edit` dari `LabelEditUpdate`, `label.association` dari `LabelAssociationUpdate` (hanya level chat; per-pesan `MessageLabelAssociationUpdate` sengaja tak diteruskan, sama dengan GOWA). Hanya field yang dikirim WhatsApp yang muncul. `predefined_id` dikirim sebagai **angka** (int32, perilaku kode GOWA) walau contoh dokumen menulis string `"1"`. `timestamp` = `action_timestamp` bila ada, selain itu waktu proses.
 - `message.deleted` (dari `DeleteMessageForMeUpdate`): seperti GOWA, hanya dikirim bila salinan pesan ada di storage device itu (dicari per id, lalu baris dihapus); tanpa `timestamp` top-level (ada di payload, = waktu proses). `from` = peserta bila disebut, selain itu akun sendiri bila `from_me`, selain itu chat (SDK tak punya `SenderJID` whatsmeow persis). `chat_id` = chat tersimpan, `chat_lid` bila event menyebut chat dengan LID.
 - Presence sendiri (`device/presence.rs`): saat `Connected` dikirim `WHATSAPP_PRESENCE_ON_CONNECT` (`available`/`unavailable`/`none`, default `unavailable`, nilai lain = unavailable seperti GOWA). Pulse (default aktif): tiap menit tiap device yang connected & login dicek; bila ≥ `WHATSAPP_PRESENCE_PULSE_INTERVAL` (24h) sejak pulse sukses terakhir → available, tidur `..._DURATION` (5m), lalu unavailable. Pulse gagal dicoba lagi pada cek berikutnya. Durasi memakai subset `time.ParseDuration` Go (`h m s ms`, bisa digabung); nilai 0/negatif **ditolak** saat start (GOWA diam-diam memakai default). Efek samping (dari dokumen GOWA): akun *available* menekan notifikasi di HP — makanya default `unavailable`. Pulse jalan per proses, state `last` hanya di memori (restart → pulse langsung).
-- Event `presence`: `timestamp` = waktu proses (GOWA `time.Now()`), `last_seen` hanya bila SDK memberi nilai. WhatsApp hanya mengirimnya untuk kontak yang sudah di-subscribe (`/user/presence/subscribe`) dan selama akun berstatus *available*; presence pulse/`WHATSAPP_PRESENCE_ON_CONNECT` belum ada, jadi event bisa jarang muncul (lihat catatan `chat_presence`).
+- Event `presence`: `timestamp` = waktu proses (GOWA `time.Now()`), `last_seen` hanya bila SDK memberi nilai. WhatsApp hanya mengirimnya untuk kontak yang sudah di-subscribe (`/user/presence/subscribe`) dan selama akun berstatus *available*; dengan default `WHATSAPP_PRESENCE_ON_CONNECT=unavailable` akun hanya *available* saat pulse (5 mnt per 24 jam), jadi event jarang muncul — set `available` bila butuh presence (lihat catatan presence sendiri di atas).
 - Auto reply/mark read ada di `device/processor.rs` (`auto_reply`, `auto_mark_read`), dijalankan setelah pesan masuk disimpan dan sebelum webhook (urutan GOWA). Auto-reply hanya untuk chat 1:1 (`@s.whatsapp.net`/`@lid`), teks ketikan asli (bukan caption; edit teks dihitung), bukan pesan sendiri; balasan dikirim ke `sender` dan disimpan ke chat storage. Mark read memakai waktu sekarang dan, di grup, menyebut pengirim. Balasan otomatis tidak memakai chat-presence/jeda apa pun; tidak ada pencegahan loop selain filter di atas (dua akun dengan auto-reply saling membalas bisa berputar — GOWA sama).
 - Call: `call.offer` hanya dari `CallAction::Offer` (`MissedCall` dari offline queue tidak dikirim; GOWA/whatsmeow juga hanya `CallOffer`). `from` = `call_creator`; auto-reject memakai `voip().reject_call(call_id, from, creator)` dengan timeout 10 dtk, gagal → `auto_rejected:false`. `/call/reject` memakai caller_jid sebagai `peer` dan `creator` (SDK memisahkan keduanya untuk companion-device). Panggilan masuk belum disimpan sebagai baris `media_type = call`.
 - `/user/business-profile`: jam buka `HH:MM` dihitung dari **menit** sejak tengah malam (540 → `09:00`); GOWA membagi 100 (`FormatBusinessHourTime`) sehingga 540 jadi `05:40` — kami sengaja tidak meniru bug itu. Waktu kosong → `00:00` (nilai nol Go). `profile_options` berisi `description`/`website` (SDK tak mengekspos flag commerce whatsmeow), `null` bila kosong. Bukan akun bisnis → 500 `business profile not found`.
@@ -136,7 +147,6 @@
     whatsmeow juga mengisi dari sumber lain (mis. `contacts` history sync, usync). Nama bisa lebih jarang terisi.
   - Nama chat 1:1 dari history sync memakai `displayName` percakapan saat ingest; GOWA lebih dulu tanya contact store
     (di read path, `/chats` tetap memakai contact store bila nama tersimpan berupa nomor/JID).
-  - `APP_TIMEZONE` (GOWA `AppLocation`) belum ada; timestamp selalu UTC.
   - Pesan error parse `start_time`/`end_time` meniru format Go tetapi detail error-nya dari chrono.
   - Teks chat storage belum meringkas pesan bisnis (template/interactive/list/buttons/product/order) — GOWA ya.
   - Panggilan masuk belum disimpan sebagai baris `media_type = call` (`CreateIncomingCallRecord`) → bersama `call.offer`.
@@ -144,12 +154,11 @@
   - Media kedaluwarsa (403/404/410) tidak diminta ulang dari HP (`ExpiredMediaRecovery`, `UpdateMessageMedia`) —
     download/forward re-upload gagal dengan pesan error biasa.
   - `/message/*/download`: `file_url` selalu `http://<Host>`; GOWA memakai skema Fiber (https bila TLS/proxy tepercaya).
-  - Forward: field jadwal (`scheduled_at`, dll.) diabaikan → Fase 4.
   - `allow_reshare` divalidasi tapi flag reshare belum dipasang ke pesan status.
   - Status message `/send/message` memakai waktu lokal server (UTC), bukan timestamp ack server.
   - `qr_duration` = setengah timeout QR dari whatsapp-rust (hasil live: 29), GOWA/whatsmeow biasanya 30.
   - Link preview: hanya `jpegThumbnail` inline; GOWA juga meng-upload thumbnail resolusi tinggi (`MediaLinkThumbnail`).
-  - Kirim media ke newsletter memakai upload biasa (GOWA: `UploadNewsletter`) → kemungkinan gagal; Fase 4.
+  - Kirim media ke newsletter memakai upload biasa (GOWA: `UploadNewsletter`) → kemungkinan gagal (belum ditangani).
   - Thumbnail dokumen hanya untuk file gambar (GOWA juga PDF).
   - `/user/info`: `name` kosong (butuh chat storage); daftar device dari usync device list.
   - `/group/info`: JSON meniru `whatsmeow types.GroupInfo` dari ingatan (nama field Go: `JID`, `Name`, `Topic`, `Participants`, ...);
@@ -157,15 +166,16 @@
     `DefaultMembershipApprovalMode`/`AnnounceVersionID` selalu kosong (whatsapp-rust tidak mengeksposnya).
   - `/group/participants|participant-requests`: `display_name` hanya dari tabel `contacts` (GOWA juga memakai verified name dari usync).
   - `/user/avatar` GET: SDK memberi `NotFound`/`NotAuthorized` (bukan error) → `AVATAR_NOT_SET` 404 / `AVATAR_HIDDEN` 403 dengan pesan whatsmeow; timeout 5 dtk per percobaan → 408 `CONTEXT_ERROR`; `is_community` dipaksa false untuk JID user dan, bila gagal, jatuh ke rute biasa (hanya diklasifikasi bila kedua percobaan sepakat, selain itu 500). Boolean query tak valid → 500 (Fiber `Bind().Query`). `type` = `preview`/`image` menurut `is_preview` (GOWA: atribut node). POST: tanpa file → 500 sebelum cek login; foto diproses seperti foto grup (crop persegi, ≤640px, JPEG q80) lalu `profile().set_profile_picture`.
-  - `/user/presence/subscribe`: LID yang pemetaannya diketahui diubah ke nomor oleh `resolve_recipient` (GOWA menolaknya sebagai non-user); peringatan `WHATSAPP_PRESENCE_ON_CONNECT` belum ada karena presence-on-connect belum diport.
+  - `/user/presence/subscribe`: LID yang pemetaannya diketahui diubah ke nomor oleh `resolve_recipient` (GOWA menolaknya sebagai non-user); log peringatan GOWA (subscribe saat `WHATSAPP_PRESENCE_ON_CONNECT` ≠ `available`, `usecase/user.go`) belum ditiru.
   - `/user/pushname`: nama kosong ditolak whatsapp-rust → 500 (GOWA mengirim app-state kosong tanpa validasi); `SyncPending` (presence terkirim tapi app-state gagal) dipetakan ke 500 seperti GOWA. `/user/pushname` memakai scope device (GOWA memakai `c.Context()` tanpa device).
   - `/user/my/contacts/detailed`: `lid` dari `get_lid_pn_entry` (PN→LID) — hanya terisi bila pemetaan sudah dipelajari SDK; filter bot memakai prefix `1313555`/`131655500` (whatsmeow `IsBot`).
   - `/user/my/groups`: grup yang daftar pesertanya dipotong server (`Truncated`) keluar dengan `Participants: []` + `ParticipantCount` benar dan field lain kosong; grup `Forbidden`/`NotFound` di antara dua IQ dilewati. `ParticipantCount` kini juga ada di `/group/info` (struct Go sama). `truncated_group_json` belum punya unit test (`GroupOverview` `non_exhaustive`, tak bisa dibangun di luar SDK).
   - `/group/info-from-link`: `participant_count` = jumlah peserta di respons (atau atribut `size` bila daftar kosong).
   - `/group/join-with-link` pada grup yang butuh persetujuan tetap mengembalikan `group_id` (GOWA/whatsmeow sama), tanpa penanda "pending".
   - `/group/topic` memakai `PreviousDescription::Resolve` (satu IQ tambahan untuk membaca id deskripsi sebelumnya).
-  - Belum ada: `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`, `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`, batas ukuran
-    via env (`WHATSAPP_SETTING_MAX_*`); konstanta default GOWA dipakai.
+  - Env GOWA yang belum didukung (di luar Chatwoot/MCP/Postgres): `APP_TRUSTED_PROXIES`, `APP_TRUSTED_ORIGINS`,
+    `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`, `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`, `WHATSAPP_FULL_HISTORY_SYNC|DAYS|SIZE_MB`,
+    `WHATSAPP_IGNORE_STATUS_MEDIA`, `WHATSAPP_CHAT_STORAGE`, batas ukuran via env (`WHATSAPP_SETTING_MAX_*`; konstanta default GOWA dipakai).
 - Header signature webhook GOWA: `X-Hub-Signature-256: sha256=<hex>`; body JSON key tersortir (Go map).
 - Event `message` tidak punya `timestamp` top-level; `message.ack` dan `device.*` punya.
 - Fitur `legacy-session-interop` di whatsapp-rust kandidat untuk migrasi sesi whatsmeow (Fase 5 spike).
@@ -175,6 +185,17 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — `WHATSAPP_PROXY`, `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING`, `APP_TIMEZONE` + rapikan dokumen
+- `src/wa/proxy.rs` (parse/sensor URL, `ProxyDialer` SOCKS5/HTTP/HTTPS, agent ureq), `config.rs` (3 flag + `ProxySetting`,
+  `Config::proxy`, `parse_timezone`, `ConfigError::InvalidProxy`), `DeviceOptions.proxy|include_outgoing`, builder bot di
+  `instance.rs`; `processor::JobKind::Sent` + `DeviceInstance::report_sent` (+`outbox`, `me` lewat `Arc::new_cyclic`),
+  `send::sent_view`; `events::{set_app_timezone, rfc3339_in, app_rfc3339}`; deps `ureq` (`socks-proxy`), `url`.
+- Test: 8 unit `wa::proxy` (parse/sensor, SOCKS5 auth+domain, penolakan, CONNECT auth/IPv6/non-2xx, dialer lewat socket
+  sungguhan), `config::proxy_timezone_and_outgoing`, `rfc3339_in_zone_matches_go`, `api_sent_message_payload`.
+  Live: QR lewat proxy HTTP dan SOCKS5 lokal (berhasil), config salah → gagal start tanpa membocorkan password.
+- Dokumen: status/langkah berikutnya ditulis ulang (analisis cakupan vs GOWA), catatan usang dibuang (forward terjadwal,
+  presence pulse, `APP_TIMEZONE`, live-updates, workflow GitHub), tabel config SPEC §7 dilengkapi, checklist config di PLAN.
 
 ### 2026-11-24 — Update gowa-ui berkala + retry (rc.2)
 - `src/ui.rs`: `update_loop` (retry/backoff, jitter), `Outcome`, pin SHA-256, token, `api_base` (untuk test), `{error:#}`; `config.rs`: `APP_UI_UPDATE_INTERVAL|GITHUB_TOKEN|ASSET_SHA256` + `parse_sha256_pin`. Pemicu: container user mencetak `dashboard update failed … error sending request` (jaringan, tak ada retry).

@@ -3,6 +3,7 @@
 
 pub mod jid;
 pub mod message;
+pub mod proxy;
 
 pub use whatsapp_rust as sdk;
 pub use whatsapp_rust::waproto::whatsapp as proto;

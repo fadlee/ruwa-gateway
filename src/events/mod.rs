@@ -103,6 +103,31 @@ pub fn rfc3339(unix_secs: i64) -> String {
         .to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
+/// `APP_TIMEZONE` (GOWA `config.AppLocation`), set once at startup.
+static APP_TIMEZONE: std::sync::OnceLock<chrono_tz::Tz> = std::sync::OnceLock::new();
+
+/// Set the REST response zone. Only the first call takes effect.
+pub fn set_app_timezone(tz: chrono_tz::Tz) {
+    let _ = APP_TIMEZONE.set(tz);
+}
+
+/// RFC 3339 in `tz`: `Z` for a zero offset, `+07:00` otherwise (Go `time.RFC3339`).
+pub fn rfc3339_in(unix_secs: i64, tz: chrono_tz::Tz) -> String {
+    DateTime::<Utc>::from_timestamp(unix_secs, 0)
+        .unwrap_or_default()
+        .with_timezone(&tz)
+        .to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// REST response timestamps (chats, messages, newsletters) in `APP_TIMEZONE`.
+/// Webhooks and storage keep [`rfc3339`] (UTC), as in GOWA.
+pub fn app_rfc3339(unix_secs: i64) -> String {
+    rfc3339_in(
+        unix_secs,
+        APP_TIMEZONE.get().copied().unwrap_or(chrono_tz::UTC),
+    )
+}
+
 /// `{event, device_id, payload}` (GOWA `forwardMessageToWebhook`).
 pub fn envelope(event: &str, device_id: &str, payload: Map<String, Value>) -> Map<String, Value> {
     let mut env = Map::new();

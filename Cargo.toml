@@ -47,6 +47,9 @@ tempfile = "3"
 diesel = { version = "2.4", default-features = false, features = ["sqlite"] }
 diesel_migrations = { version = "2.4", default-features = false, features = ["sqlite"] }
 chrono-tz = "0.10.4"
+# `WHATSAPP_PROXY` for the SDK's media client; same major as whatsapp-rust's ureq-client.
+ureq = { version = "3", default-features = false, features = ["rustls", "socks-proxy"] }
+url = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

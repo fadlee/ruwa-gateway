@@ -365,11 +365,12 @@ pub(crate) async fn deliver(
     if let Some(Some(code)) = device.acks.wait(&message_id, ACK_WAIT).await {
         return Err(nack_error(&code));
     }
-    let own = client
+    let own_jid = client
         .pn()
-        .map(|pn| pn.to_non_ad().to_string())
-        .or_else(|| device.jid())
-        .unwrap_or_default();
+        .map(|pn| pn.to_non_ad())
+        .or_else(|| device.jid().and_then(|j| parse_jid(&j).ok()));
+    let own = own_jid.as_ref().map(Jid::to_string).unwrap_or_default();
+    let now = crate::device::now();
     if let Err(error) = crate::device::store_sent(
         device.chats(),
         &device.storage_partition(),
@@ -377,14 +378,52 @@ pub(crate) async fn deliver(
         recipient,
         &message_id,
         text,
-        crate::device::now(),
+        now,
         &message,
     )
     .await
     {
         tracing::warn!(id = %message_id, %error, "failed to store sent message");
     }
+    if device.reports_sent()
+        && let Some(sender) = own_jid
+    {
+        device.report_sent(sent_view(
+            &message_id,
+            recipient,
+            sender,
+            client.push_name(),
+            now,
+            message,
+        ));
+    }
     Ok(message_id)
+}
+
+/// An API-sent message seen the way a phone-sent one arrives: from us, in
+/// the recipient's chat.
+pub(crate) fn sent_view(
+    id: &str,
+    recipient: &Jid,
+    sender: Jid,
+    push_name: String,
+    timestamp: i64,
+    message: proto::Message,
+) -> crate::events::IncomingMessage {
+    crate::events::IncomingMessage {
+        id: id.to_owned(),
+        chat: recipient.to_non_ad(),
+        sender,
+        is_from_me: true,
+        push_name,
+        timestamp,
+        verified_name: None,
+        verified_level: None,
+        is_business: false,
+        sender_alt: None,
+        admin_revoke: false,
+        message: Arc::new(message),
+    }
 }
 
 /// Stand-in for the server ack timestamp GOWA prints in `status`.

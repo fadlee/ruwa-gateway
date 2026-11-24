@@ -75,7 +75,15 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 - [x] `/ws` hub
 - [x] update UI berkala (retry + backoff), `APP_UI_UPDATE_INTERVAL`, `APP_UI_GITHUB_TOKEN`, `APP_UI_ASSET_SHA256`
 - [x] `/app/metrics` (`src/sysmetrics.rs`)
-- [x] Docker image + release binary (amd64/arm64): `Dockerfile`, `.github/workflows/ci.yml` + `release.yml` (belum dicoba di GitHub — repo belum punya remote)
+- [x] Docker image + release binary (amd64/arm64): `Dockerfile`, `.github/workflows/ci.yml` + `release.yml` (rc.1 dirilis, workflow hijau; image arm64 belum pernah dijalankan)
+
+## Kompatibilitas config GOWA
+
+- [x] `WHATSAPP_PROXY` (SOCKS5/HTTP/HTTPS untuk WebSocket + media; `src/wa/proxy.rs`)
+- [x] `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING` (webhook `message` untuk pesan kirim lewat API)
+- [x] `APP_TIMEZONE` (timestamp respons REST chat/pesan/newsletter)
+- [ ] `APP_TRUSTED_PROXIES` (skema `file_url` di balik reverse proxy TLS), `APP_TRUSTED_ORIGINS`
+- [ ] `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`, `WHATSAPP_FULL_HISTORY_*`, `WHATSAPP_IGNORE_STATUS_MEDIA`
 
 ## Fase 5 — Opsional
 

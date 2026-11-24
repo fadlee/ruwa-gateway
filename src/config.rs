@@ -81,6 +81,36 @@ pub struct Config {
     )]
     pub webhook_ignore_jids: Vec<String>,
 
+    /// Also send `message` webhooks for messages sent through this API
+    /// (WhatsApp only echoes messages sent from the phone).
+    #[arg(
+        long = "webhook-include-outgoing",
+        env = "WHATSAPP_WEBHOOK_INCLUDE_OUTGOING",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub webhook_include_outgoing: bool,
+
+    /// Outbound proxy for the WhatsApp socket and media transfers
+    /// (`socks5://user:pass@host:1080`, `http://host:8080`, `https://...`).
+    #[arg(
+        long = "whatsapp-proxy",
+        env = "WHATSAPP_PROXY",
+        default_value = "",
+        value_parser = parse_proxy
+    )]
+    pub whatsapp_proxy: ProxySetting,
+
+    /// IANA zone for chat, message and newsletter timestamps in REST
+    /// responses. Storage and webhooks stay UTC.
+    #[arg(
+        long = "timezone",
+        env = "APP_TIMEZONE",
+        default_value = "UTC",
+        value_parser = parse_timezone
+    )]
+    pub timezone: chrono_tz::Tz,
+
     #[arg(
         long = "webhook-insecure-skip-verify",
         env = "WHATSAPP_WEBHOOK_INSECURE_SKIP_VERIFY",
@@ -215,6 +245,10 @@ pub enum ConfigError {
         "APP_BASIC_AUTH is empty while binding to non-loopback host {0}; set APP_BASIC_AUTH or APP_ALLOW_UNAUTHENTICATED=true"
     )]
     UnauthenticatedPublicBind(IpAddr),
+    /// An invalid proxy refuses to start (GOWA logs and connects directly,
+    /// which would bypass the proxy the operator asked for).
+    #[error("invalid WHATSAPP_PROXY: {0}")]
+    InvalidProxy(String),
 }
 
 impl Config {
@@ -233,8 +267,20 @@ impl Config {
             .collect()
     }
 
+    /// `WHATSAPP_PROXY`, parsed; `None` = direct connection.
+    pub fn proxy(&self) -> Result<Option<crate::wa::proxy::ProxyUrl>, ConfigError> {
+        let raw = self.whatsapp_proxy.0.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        crate::wa::proxy::ProxyUrl::parse(raw)
+            .map(Some)
+            .map_err(ConfigError::InvalidProxy)
+    }
+
     /// GOWA refuses to start unauthenticated on a public bind.
     pub fn validate(&self) -> Result<Vec<Credential>, ConfigError> {
+        self.proxy()?;
         let creds = self.credentials()?;
         if creds.is_empty() && !self.host.is_loopback() && !self.allow_unauthenticated {
             return Err(ConfigError::UnauthenticatedPublicBind(self.host));
@@ -250,6 +296,40 @@ impl Config {
         } else {
             format!("/{trimmed}")
         }
+    }
+}
+
+/// Raw `WHATSAPP_PROXY`. Kept as text so clap never echoes it (with its
+/// credentials) in a parse error; [`Config::proxy`] validates it.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ProxySetting(String);
+
+impl std::fmt::Debug for ProxySetting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match crate::wa::proxy::ProxyUrl::parse(&self.0) {
+            _ if self.0.trim().is_empty() => f.write_str("\"\""),
+            Ok(url) => write!(f, "{url:?}"),
+            Err(_) => f.write_str("<invalid proxy URL>"),
+        }
+    }
+}
+
+fn parse_proxy(raw: &str) -> Result<ProxySetting, String> {
+    Ok(ProxySetting(raw.to_owned()))
+}
+
+/// `APP_TIMEZONE`: an IANA name. Empty means the default (UTC), like an
+/// unset GOWA env; `Local` is rejected (GOWA pins it to UTC).
+pub fn parse_timezone(raw: &str) -> Result<chrono_tz::Tz, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Ok(chrono_tz::UTC);
+    }
+    match name.parse::<chrono_tz::Tz>() {
+        Ok(tz) if name != "Local" => Ok(tz),
+        _ => Err(format!(
+            "invalid timezone {raw:?} (APP_TIMEZONE or --timezone): use an IANA name such as Europe/Paris"
+        )),
     }
 }
 
@@ -364,6 +444,44 @@ mod tests {
             "/gowa"
         );
         assert_eq!(cfg(&[]).normalized_base_path(), "");
+    }
+
+    #[test]
+    fn proxy_timezone_and_outgoing() {
+        let c = cfg(&[]);
+        assert_eq!(c.proxy(), Ok(None));
+        assert_eq!(c.timezone, chrono_tz::UTC);
+        assert!(!c.webhook_include_outgoing);
+
+        let c = cfg(&[
+            "--whatsapp-proxy",
+            "socks5://u:p@h:1080",
+            "--timezone",
+            "Asia/Jakarta",
+            "--webhook-include-outgoing",
+            "true",
+        ]);
+        assert!(c.proxy().unwrap().is_some());
+        assert_eq!(c.timezone, chrono_tz::Asia::Jakarta);
+        assert!(c.webhook_include_outgoing);
+        // Credentials never reach Debug output (startup logs, panics).
+        assert!(!format!("{c:?}").contains("u:p"));
+
+        assert_eq!(parse_timezone(""), Ok(chrono_tz::UTC));
+        for bad in ["Local", "Mars/Olympus", "+07:00"] {
+            assert!(parse_timezone(bad).is_err(), "{bad}");
+        }
+        assert_eq!(cfg(&["--whatsapp-proxy", "  "]).proxy(), Ok(None));
+        let bad = cfg(&[
+            "--host",
+            "127.0.0.1",
+            "--whatsapp-proxy",
+            "ftp://u:pw-x9q@h",
+        ]);
+        assert!(!format!("{bad:?}").contains("pw-x9q"));
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(err.starts_with("invalid WHATSAPP_PROXY"), "{err}");
+        assert!(!err.contains("pw-x9q"), "{err}");
     }
 
     #[test]

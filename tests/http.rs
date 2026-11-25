@@ -50,6 +50,7 @@ async fn harness_with(creds: Vec<Credential>, base: &str, slots: &[&str]) -> Har
             media_dir: dir.path().join("statics/media"),
             auto_download_media: true,
             ignore_status_media: false,
+            all_device_receipts: false,
             auto_reject_call: false,
             auto_mark_read: false,
             auto_reply: String::new(),

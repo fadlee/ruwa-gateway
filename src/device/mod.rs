@@ -54,6 +54,8 @@ pub struct DeviceOptions {
     pub auto_download_media: bool,
     /// `WHATSAPP_IGNORE_STATUS_MEDIA`.
     pub ignore_status_media: bool,
+    /// `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`.
+    pub all_device_receipts: bool,
     /// `WHATSAPP_AUTO_REJECT_CALL`.
     pub auto_reject_call: bool,
     /// `WHATSAPP_AUTO_MARK_READ`.
@@ -129,6 +131,7 @@ impl DeviceManager {
                 dir: manager.opts.media_dir.clone(),
                 auto_download: manager.opts.auto_download_media,
                 ignore_status_media: manager.opts.ignore_status_media,
+                all_device_receipts: manager.opts.all_device_receipts,
                 auto_reject_call: manager.opts.auto_reject_call,
                 auto_mark_read: manager.opts.auto_mark_read,
                 auto_reply: manager.opts.auto_reply.clone(),

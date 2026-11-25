@@ -12,10 +12,11 @@
   Fase 1–3 tuntas (kode); Fase 4: scheduler, newsletter (follow/unfollow/info/messages/download/live-updates +
   `newsletter.message`), gowa-ui, `/ws`, `/app/metrics`, Docker/rilis selesai.
 - **Config GOWA (2026-11-24)**: `WHATSAPP_PROXY`, `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING`, `APP_TIMEZONE`,
-  `APP_TRUSTED_PROXIES`, `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`, `WHATSAPP_IGNORE_STATUS_MEDIA` selesai.
+  `APP_TRUSTED_PROXIES`, `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`, `WHATSAPP_IGNORE_STATUS_MEDIA`,
+  `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS` selesai. JSON `/group/info` + `/user/my/groups` dicocokkan dengan source whatsmeow.
   Sisa env yang belum: lihat "Perbedaan perilaku" dan checklist di PLAN.md.
 - **Rilis**: versi crate `0.1.0-rc.2` (rc.1 sudah dirilis dan workflow terbukti hijau di GitHub: CI, tarball amd64+arm64, image GHCR); `Dockerfile` (+ `.dockerignore`), `.github/workflows/ci.yml` dan `release.yml` ada; image sudah dibangun & di-smoke-test lokal (health, `/app/metrics`, SIGTERM 1 dtk, ffmpeg, uid 10001; 258MB). Image arm64 belum pernah dijalankan.
-- **Build**: `cargo test` (255 test: 204 unit + 51 HTTP/WS; 1 test jaringan `#[ignore]`),
+- **Build**: `cargo test` (256 test: 205 unit + 51 HTTP/WS; 1 test jaringan `#[ignore]`),
   `cargo clippy --all-targets` → hijau. Test video/PTT memakai ffmpeg sungguhan bila terpasang (di-skip bila tidak).
 - **Terverifikasi manual oleh user (2026-11-23, via gowa-ui)**: pair 2 akun (QR), kirim pesan teks.
 - **Terverifikasi live oleh agent (tanpa akun)**: handshake + QR, multi-device + restart, link preview ke internet,
@@ -40,16 +41,18 @@
    `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING=true` → webhook `message` `is_from_me:true`; `WHATSAPP_PROXY` ke proxy sungguhan
    lalu kirim media (upload CDN lewat proxy); `APP_TIMEZONE=Asia/Jakarta` → `GET /chats` ber-offset `+07:00`;
    `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL=true` + webhook per device → event sampai di kedua URL;
-   `WHATSAPP_IGNORE_STATUS_MEDIA=true` → status bergambar dari kontak tidak diunduh.
-2. Bandingkan JSON `/group/info` dengan output GOWA asli (ditulis dari ingatan struct whatsmeow).
-3. Sisa Fase 4: newsletter `message-updates|directory` + event `newsletter.joined|left|mute` (lihat catatan newsletter).
-4. Env GOWA tersisa: `WHATSAPP_FULL_HISTORY_*` (cek dulu dukungan SDK), `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`, `APP_TRUSTED_ORIGINS`.
-5. Rilis stabil: naikkan `version` ke `0.1.0` lalu push tag `v0.1.0`.
+   `WHATSAPP_IGNORE_STATUS_MEDIA=true` → status bergambar dari kontak tidak diunduh; `GET /group/info` di grup sungguhan
+   → `ParticipantCount` terisi (atribut `size`), timestamp UTC.
+2. Sisa Fase 4: newsletter `message-updates|directory` + event `newsletter.joined|left|mute` (lihat catatan newsletter).
+3. Env GOWA tersisa: `WHATSAPP_FULL_HISTORY_*` (cek dulu dukungan SDK), `APP_TRUSTED_ORIGINS`.
+4. Rilis stabil: naikkan `version` ke `0.1.0` lalu push tag `v0.1.0`.
 
 ## Keputusan yang sudah diambil
 
 | Tanggal | Keputusan | Alasan |
 |---|---|---|
+| 2026-11-24 | `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS=true` meneruskan receipt `delivery` dari semua device kontak (default: hanya device 0; `read`/`played` selalu lolos) | sama dengan GOWA `shouldForwardReceipt` |
+| 2026-11-24 | Timestamp grup (`/group/info`, `/user/my/groups`, `created_at` info-from-link, `requested_at` participant-requests) pakai `chat::format_go_time` (UTC), bukan `format_ts` | di GOWA nilainya `time.Time` dari whatsmeow yang di-marshal apa adanya, dan `time.Local` dipatok UTC; `APP_TIMEZONE` hanya untuk `formatTimestamp` |
 | 2026-11-24 | `APP_TRUSTED_PROXIES` meniru Fiber `TrustProxy`: `X-Forwarded-Proto`/`-Protocol`/`-Ssl`/`X-Url-Scheme` + `X-Forwarded-Host` (nilai pertama) hanya dipakai bila IP peer (`ConnectInfo`, IPv4-mapped dinormalkan) ada di daftar; dipakai `qr_link` (`/app/login`, `/devices/{id}/login`) dan `file_url` (`/message/{id}/download`, `/newsletter/messages/{id}/download`). Entri salah → gagal start | sebelumnya `qr_link` selalu percaya `X-Forwarded-*` dari siapa pun (bisa dipalsukan) dan `file_url` selalu `http://`. **Perubahan perilaku**: tanpa env ini header forwarded kini diabaikan, sama dengan GOWA default |
 | 2026-11-24 | `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL` = `Dispatcher::legs`: leg device (+fallback secret/event global) dan leg global (secret, filter event, insecure-skip-verify global); URL global yang sama dengan URL device yang mengirim dibuang; bila filter device menolak event, URL itu tetap dapat sebagai target global; ignore-JID berlaku untuk keduanya | sama dengan GOWA `forwardPayloadWithWebhookConfig` |
 | 2026-11-24 | `WHATSAPP_IGNORE_STATUS_MEDIA=true` = media dari `status@broadcast` tidak di-auto-download untuk webhook (payload bentuk `{url, ...}` seperti auto-download mati) | di GOWA flag ini hanya memengaruhi `handleImageMessage` (unduh gambar terpisah yang tak kita punya); webhook GOWA tetap mengunduh. Arti yang dipakai = maksud flag ("ignore downloading status media") |
@@ -172,9 +175,11 @@
   - Kirim media ke newsletter memakai upload biasa (GOWA: `UploadNewsletter`) → kemungkinan gagal (belum ditangani).
   - Thumbnail dokumen hanya untuk file gambar (GOWA juga PDF).
   - `/user/info`: `name` kosong (butuh chat storage); daftar device dari usync device list.
-  - `/group/info`: JSON meniru `whatsmeow types.GroupInfo` dari ingatan (nama field Go: `JID`, `Name`, `Topic`, `Participants`, ...);
-    versi whatsmeow acuan GOWA lebih baru dari yang bisa diverifikasi → bandingkan dengan output GOWA asli bila ada konsumen yang bergantung.
-    `DefaultMembershipApprovalMode`/`AnnounceVersionID` selalu kosong (whatsapp-rust tidak mengeksposnya).
+  - `/group/info` & `/user/my/groups`: JSON = `whatsmeow types.GroupInfo` dari `parseGroupNode` di whatsmeow `307a2edf117d`
+    (pin GOWA), 32 key urut struct Go (`zero_group_info`). Waktu selalu UTC (GOWA `time.Local = time.UTC`), bukan `APP_TIMEZONE`;
+    `ParticipantCount` = atribut `size` (0 bila tak ada), `Participants` kosong = `null`, `DisplayName` = atribut `display_name`
+    server (bukan nama kontak), `TopicDeleted` selalu `false` (whatsmeow juga tak mengisinya). Beda: `PhoneNumber` peserta LID
+    juga diisi dari pemetaan LID→PN SDK bila node tak membawa `phone_number`. Grup `Truncated` = struct nol + identitas/hierarki/jumlah.
   - `/group/participants|participant-requests`: `display_name` hanya dari tabel `contacts` (GOWA juga memakai verified name dari usync).
   - `/user/avatar` GET: SDK memberi `NotFound`/`NotAuthorized` (bukan error) → `AVATAR_NOT_SET` 404 / `AVATAR_HIDDEN` 403 dengan pesan whatsmeow; timeout 5 dtk per percobaan → 408 `CONTEXT_ERROR`; `is_community` dipaksa false untuk JID user dan, bila gagal, jatuh ke rute biasa (hanya diklasifikasi bila kedua percobaan sepakat, selain itu 500). Boolean query tak valid → 500 (Fiber `Bind().Query`). `type` = `preview`/`image` menurut `is_preview` (GOWA: atribut node). POST: tanpa file → 500 sebelum cek login; foto diproses seperti foto grup (crop persegi, ≤640px, JPEG q80) lalu `profile().set_profile_picture`.
   - `/user/presence/subscribe`: LID yang pemetaannya diketahui diubah ke nomor oleh `resolve_recipient` (GOWA menolaknya sebagai non-user); log peringatan GOWA (subscribe saat `WHATSAPP_PRESENCE_ON_CONNECT` ≠ `available`, `usecase/user.go`) belum ditiru.
@@ -185,7 +190,7 @@
   - `/group/join-with-link` pada grup yang butuh persetujuan tetap mengembalikan `group_id` (GOWA/whatsmeow sama), tanpa penanda "pending".
   - `/group/topic` memakai `PreviousDescription::Resolve` (satu IQ tambahan untuk membaca id deskripsi sebelumnya).
   - Env GOWA yang belum didukung (di luar Chatwoot/MCP/Postgres): `APP_TRUSTED_ORIGINS`,
-    `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`, `WHATSAPP_FULL_HISTORY_SYNC|DAYS|SIZE_MB`, `WHATSAPP_CHAT_STORAGE`, batas ukuran via env (`WHATSAPP_SETTING_MAX_*`; konstanta default GOWA dipakai).
+    `WHATSAPP_FULL_HISTORY_SYNC|DAYS|SIZE_MB`, `WHATSAPP_CHAT_STORAGE`, batas ukuran via env (`WHATSAPP_SETTING_MAX_*`; konstanta default GOWA dipakai).
 - Header signature webhook GOWA: `X-Hub-Signature-256: sha256=<hex>`; body JSON key tersortir (Go map).
 - Event `message` tidak punya `timestamp` top-level; `message.ack` dan `device.*` punya.
 - Fitur `legacy-session-interop` di whatsapp-rust kandidat untuk migrasi sesi whatsmeow (Fase 5 spike).
@@ -195,6 +200,20 @@
   - zapfast (pola multi-akun): `~/.opensrc/repos/github.com/crmne/zapfast/main`
 
 ## Log
+
+### 2026-11-24 — JSON `/group/info` dicocokkan dengan whatsmeow + `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`
+- Sumber acuan: GOWA `usecase/group.go` (`response.Data = *groupInfo`, tanpa olahan) + whatsmeow `types/group.go`,
+  `group.go` (`parseGroupNode`, `parseParticipant`) di commit pin GOWA.
+- Perbaikan `group_info_json`: tambah `Suspended`; `ParticipantCount` dari `size`; `AnnounceVersionID` = `admin_version_id`;
+  `DefaultMembershipApprovalMode` = `request_required` dari `parent_membership_approval_required`; `IsEphemeral` = ada node
+  `<ephemeral>`; `DisplayName` dari `details.display_name` (sebelumnya nama kontak); `Participants` kosong → `null`; waktu UTC;
+  peserta PN selalu `PhoneNumber = JID`; grup terpotong kini lengkap 32 key. `group_info_values` tak lagi query kontak.
+- `created_at` (`/group/info-from-link`) dan `requested_at` (`/group/participant-requests`) juga UTC.
+- `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS` (`--webhook-all-device-receipts`): `should_forward_receipt(r, all_devices)`,
+  `DeviceOptions`/`MediaSettings.all_device_receipts`.
+- Test: `group_info_uses_whatsmeow_field_names` (diperluas: urutan & jumlah key), `group_participant_matches_parse_participant`,
+  `receipt_forwarding_rules` + kasus all-device, config.
+- Disk penuh saat build: `target/debug` 68 GB; `target/debug/incremental` (29 GB) dihapus.
 
 ### 2026-11-24 — `APP_TRUSTED_PROXIES`, `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`, `WHATSAPP_IGNORE_STATUS_MEDIA`
 - `src/http/forwarded.rs` (extractor `PublicOrigin`, `is_trusted`, skema ala Fiber), `Settings.trusted_proxies`,

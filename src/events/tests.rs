@@ -514,18 +514,24 @@ async fn receipt_read() {
 #[test]
 fn receipt_forwarding_rules() {
     let mut rc = receipt("delivery", "2025-07-18T22:44:20Z");
-    assert!(should_forward_receipt(&rc));
+    assert!(should_forward_receipt(&rc, false));
     rc.sender = jid("6289685000000:3@s.whatsapp.net");
     assert!(
-        !should_forward_receipt(&rc),
+        !should_forward_receipt(&rc, false),
         "linked-device delivery is dropped"
     );
     rc.receipt_type = "read".into();
-    assert!(should_forward_receipt(&rc));
+    assert!(should_forward_receipt(&rc, false));
     rc.receipt_type = "read-self".into();
-    assert!(!should_forward_receipt(&rc));
+    assert!(!should_forward_receipt(&rc, false));
     rc.is_from_me = true;
-    assert!(should_forward_receipt(&rc));
+    assert!(should_forward_receipt(&rc, false));
+    rc.receipt_type = "delivery".into();
+    rc.is_from_me = false;
+    assert!(
+        should_forward_receipt(&rc, true),
+        "WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS keeps linked-device delivery"
+    );
 }
 
 #[test]

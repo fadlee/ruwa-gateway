@@ -111,6 +111,16 @@ pub struct Config {
     )]
     pub webhook_device_merge_global: bool,
 
+    /// Forward delivery receipts from every linked device of a contact, not
+    /// only the primary one (read/played always pass).
+    #[arg(
+        long = "webhook-all-device-receipts",
+        env = "WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub webhook_all_device_receipts: bool,
+
     /// Outbound proxy for the WhatsApp socket and media transfers
     /// (`socks5://user:pass@host:1080`, `http://host:8080`, `https://...`).
     #[arg(
@@ -533,8 +543,11 @@ mod tests {
         assert_eq!(c.trusted_proxies(), Ok(vec![]));
         assert!(!c.webhook_device_merge_global);
         assert!(!c.ignore_status_media);
+        assert!(!c.webhook_all_device_receipts);
 
         let c = cfg(&[
+            "--webhook-all-device-receipts",
+            "true",
             "--trusted-proxies",
             "0.0.0.0/0, 10.1.2.3,,::1",
             "--webhook-device-merge-global",
@@ -551,6 +564,7 @@ mod tests {
         assert_eq!(nets, ["0.0.0.0/0", "10.1.2.3/32", "::1/128"]);
         assert!(c.webhook_device_merge_global);
         assert!(c.ignore_status_media);
+        assert!(c.webhook_all_device_receipts);
 
         let bad = cfg(&["--host", "127.0.0.1", "--trusted-proxies", "10.0.0.0/33"]);
         assert_eq!(

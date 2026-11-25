@@ -653,9 +653,11 @@ async fn replace_lid_mentions<R: Resolver>(r: &R, text: &str) -> String {
     out
 }
 
-/// GOWA `shouldForwardReceipt` (with `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS` off).
-pub fn should_forward_receipt(r: &ReceiptView) -> bool {
-    if r.sender.device == 0 {
+/// GOWA `shouldForwardReceipt`: every device of a contact acknowledges
+/// delivery, so linked-device delivery receipts are dropped unless
+/// `all_devices` (`WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`).
+pub fn should_forward_receipt(r: &ReceiptView, all_devices: bool) -> bool {
+    if all_devices || r.sender.device == 0 {
         return true;
     }
     match r.receipt_type.as_str() {

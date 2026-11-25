@@ -85,7 +85,8 @@ pesan masuk memicu webhook dengan payload identik contoh GOWA.
 - [x] `APP_TRUSTED_PROXIES` (`qr_link`/`file_url` di balik reverse proxy TLS; `src/http/forwarded.rs`)
 - [x] `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL`
 - [x] `WHATSAPP_IGNORE_STATUS_MEDIA`
-- [ ] `APP_TRUSTED_ORIGINS`, `WHATSAPP_FULL_HISTORY_*`, `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`
+- [x] `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`
+- [ ] `APP_TRUSTED_ORIGINS`, `WHATSAPP_FULL_HISTORY_*`
 
 ## Fase 5 — Opsional
 

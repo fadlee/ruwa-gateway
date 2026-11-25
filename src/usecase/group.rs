@@ -10,7 +10,7 @@ use crate::{
     error::{ApiError, ApiResult},
     media::{self, Upload},
     usecase::{
-        chat::{format_ts, ozzo, required},
+        chat::{format_go_time, ozzo, required},
         names,
         send::{must_login, resolve_recipient},
     },
@@ -367,7 +367,7 @@ pub async fn info_from_link(device: &DeviceInstance, link: &str) -> ApiResult<In
         group_id: meta.id.to_string(),
         name: meta.subject.clone().unwrap_or_default(),
         topic: topic.clone(),
-        created_at: format_ts(meta.creation_time.unwrap_or(0) as i64),
+        created_at: format_go_time(meta.creation_time.unwrap_or(0) as i64),
         participant_count: if meta.participants.is_empty() {
             meta.participant_count.unwrap_or(0) as usize
         } else {
@@ -532,7 +532,7 @@ pub async fn join_requests(
                 .map(|j| j.user.to_string())
                 .unwrap_or_default(),
             display_name: names.get(key).cloned().unwrap_or_default(),
-            requested_at: format_ts(r.request_time.unwrap_or(0) as i64),
+            requested_at: format_go_time(r.request_time.unwrap_or(0) as i64),
         })
         .collect())
 }
@@ -705,32 +705,35 @@ fn jid_str(j: &Option<Jid>) -> String {
     j.as_ref().map(|j| j.to_string()).unwrap_or_default()
 }
 
-/// whatsmeow `types.GroupInfo` marshalled by Go's `encoding/json` (embedded
-/// structs are flattened, keys keep the Go field names).
-fn group_info_json(
-    meta: &GroupMetadata,
-    phones: &[Option<Jid>],
-    names: &HashMap<String, String>,
-) -> Value {
+/// whatsmeow `types.GroupInfo` (`parseGroupNode` @ GOWA's pin) marshalled by
+/// Go's `encoding/json`: embedded structs are flattened, keys keep the Go
+/// field names, every field is present, times are UTC. `phones` fills
+/// `PhoneNumber` for LID participants when the node lacks `phone_number`.
+fn group_info_json(meta: &GroupMetadata, phones: &[Option<Jid>]) -> Value {
     let participants: Vec<Value> = meta
         .participants
         .iter()
-        .zip(phones)
+        .zip(phones.iter().chain(std::iter::repeat(&None)))
         .map(|(p, phone)| {
-            let phone_number = phone
-                .clone()
-                .or_else(|| p.phone_number.clone())
-                .map(|j| j.to_string())
-                .unwrap_or_default();
+            // parseParticipant: a PN participant is its own PhoneNumber.
+            let phone_number = if jid::is_pn_user(&p.jid) {
+                p.jid.to_string()
+            } else {
+                phone
+                    .clone()
+                    .or_else(|| p.phone_number.clone())
+                    .map(|j| j.to_string())
+                    .unwrap_or_default()
+            };
             let lid = match (&p.lid, p.jid.is_lid()) {
-                (Some(l), _) => l.to_string(),
-                (None, true) => p.jid.to_string(),
+                (_, true) => p.jid.to_string(),
+                (Some(l), false) => l.to_string(),
                 _ => String::new(),
             };
-            let display_name = phone
+            let display_name = p
+                .details
                 .as_ref()
-                .and_then(|j| names.get(&j.to_string()))
-                .cloned()
+                .and_then(|d| d.display_name.as_deref())
                 .unwrap_or_default();
             json!({
                 "JID": p.jid.to_string(),
@@ -745,39 +748,92 @@ fn group_info_json(
         })
         .collect();
     let ephemeral = meta.ephemeral.as_ref().and_then(|e| e.expiration);
-    json!({
-        "JID": meta.id.to_string(),
+    let mut v = zero_group_info(&meta.id);
+    let fields = json!({
         "OwnerJID": jid_str(&meta.creator),
         "OwnerPN": jid_str(&meta.creator_pn),
         "Name": meta.subject.clone().unwrap_or_default(),
-        "NameSetAt": format_ts(meta.subject_time.unwrap_or(0) as i64),
+        "NameSetAt": format_go_time(meta.subject_time.unwrap_or(0) as i64),
         "NameSetBy": jid_str(&meta.subject_owner),
         "NameSetByPN": jid_str(&meta.subject_owner_pn),
         "Topic": meta.description.clone().unwrap_or_default(),
         "TopicID": meta.description_id.clone().unwrap_or_default(),
-        "TopicSetAt": format_ts(meta.description_time.unwrap_or(0) as i64),
+        "TopicSetAt": format_go_time(meta.description_time.unwrap_or(0) as i64),
         "TopicSetBy": jid_str(&meta.description_owner),
         "TopicSetByPN": jid_str(&meta.description_owner_pn),
-        "TopicDeleted": false,
         "IsLocked": meta.is_locked,
         "IsAnnounce": meta.is_announcement,
-        "AnnounceVersionID": "",
-        "IsEphemeral": ephemeral.is_some_and(|e| e > 0),
+        "AnnounceVersionID": meta.admin_version_id.clone().unwrap_or_default(),
+        "IsEphemeral": meta.ephemeral.is_some(),
         "DisappearingTimer": ephemeral.unwrap_or(0),
         "IsIncognito": meta.is_incognito,
         "IsParent": meta.is_parent_group,
-        "DefaultMembershipApprovalMode": "",
+        "DefaultMembershipApprovalMode": if meta.parent_membership_approval_required {
+            "request_required"
+        } else {
+            ""
+        },
         "LinkedParentJID": jid_str(&meta.parent_group_jid),
         "IsDefaultSubGroup": meta.is_default_sub_group,
         "IsJoinApprovalRequired": meta.membership_approval,
         "AddressingMode": meta.addressing_mode.as_str(),
-        "GroupCreated": format_ts(meta.creation_time.unwrap_or(0) as i64),
+        "GroupCreated": format_go_time(meta.creation_time.unwrap_or(0) as i64),
         "CreatorCountryCode": meta.creator_country_code.clone().unwrap_or_default(),
         "ParticipantVersionID": meta.participant_version_id.clone().unwrap_or_default(),
-        "Participants": participants,
-        "ParticipantCount": meta.participants.len(),
+        // A nil Go slice marshals as `null`.
+        "Participants": if participants.is_empty() { Value::Null } else { participants.into() },
+        // whatsmeow reads the node's `size` attribute, not the list length.
+        "ParticipantCount": meta.participant_count.unwrap_or(0),
         "MemberAddMode": meta.member_add_mode.map(|m| m.as_str()).unwrap_or_default(),
+        "Suspended": meta.is_suspended,
+    });
+    merge(&mut v, fields);
+    v
+}
+
+/// A zero-valued `types.GroupInfo` for `id`, in Go field order.
+fn zero_group_info(id: &Jid) -> Value {
+    const ZERO_TIME: &str = "0001-01-01T00:00:00Z";
+    json!({
+        "JID": id.to_string(),
+        "OwnerJID": "",
+        "OwnerPN": "",
+        "Name": "",
+        "NameSetAt": ZERO_TIME,
+        "NameSetBy": "",
+        "NameSetByPN": "",
+        "Topic": "",
+        "TopicID": "",
+        "TopicSetAt": ZERO_TIME,
+        "TopicSetBy": "",
+        "TopicSetByPN": "",
+        "TopicDeleted": false,
+        "IsLocked": false,
+        "IsAnnounce": false,
+        "AnnounceVersionID": "",
+        "IsEphemeral": false,
+        "DisappearingTimer": 0,
+        "IsIncognito": false,
+        "IsParent": false,
+        "DefaultMembershipApprovalMode": "",
+        "LinkedParentJID": "",
+        "IsDefaultSubGroup": false,
+        "IsJoinApprovalRequired": false,
+        "AddressingMode": "",
+        "GroupCreated": ZERO_TIME,
+        "CreatorCountryCode": "",
+        "ParticipantVersionID": "",
+        "Participants": Value::Null,
+        "ParticipantCount": 0,
+        "MemberAddMode": "",
+        "Suspended": false,
     })
+}
+
+fn merge(into: &mut Value, from: Value) {
+    if let (Value::Object(into), Value::Object(from)) = (into, from) {
+        into.extend(from);
+    }
 }
 
 pub async fn info(
@@ -793,36 +849,21 @@ pub async fn info(
         .fetch_metadata(&group)
         .await
         .map_err(ApiError::internal)?;
-    Ok(group_info_values(device, &client, &[meta]).await.remove(0))
+    Ok(group_info_values(&client, &[meta]).await.remove(0))
 }
 
-/// Full `GroupInfo` JSON for several groups: LID→phone lookups per participant,
-/// then one contact-book query for every phone across all groups.
-async fn group_info_values(
-    device: &DeviceInstance,
-    client: &Client,
-    metas: &[GroupMetadata],
-) -> Vec<Value> {
-    let mut phones: Vec<Vec<Option<Jid>>> = Vec::with_capacity(metas.len());
+/// Full `GroupInfo` JSON for several groups, with LID→phone lookups per
+/// participant.
+async fn group_info_values(client: &Client, metas: &[GroupMetadata]) -> Vec<Value> {
+    let mut out = Vec::with_capacity(metas.len());
     for meta in metas {
-        let mut row = Vec::with_capacity(meta.participants.len());
+        let mut phones = Vec::with_capacity(meta.participants.len());
         for p in &meta.participants {
-            row.push(phone_jid(client, &p.jid, p.phone_number.as_ref()).await);
+            phones.push(phone_jid(client, &p.jid, p.phone_number.as_ref()).await);
         }
-        phones.push(row);
+        out.push(group_info_json(meta, &phones));
     }
-    let lookups = phones
-        .iter()
-        .flatten()
-        .flatten()
-        .map(|j| j.to_string())
-        .collect();
-    let names = contact_names(device, lookups).await;
-    metas
-        .iter()
-        .zip(&phones)
-        .map(|(meta, phones)| group_info_json(meta, phones, &names))
-        .collect()
+    out
 }
 
 /// Overview-only `GroupInfo` for a group whose participant list the server
@@ -837,15 +878,18 @@ fn truncated_group_json(o: &GroupOverview, count: u32) -> Value {
         ),
         _ => (false, String::new(), false),
     };
-    json!({
-        "JID": o.id.to_string(),
-        "Name": o.subject.clone().unwrap_or_default(),
-        "ParticipantCount": count,
-        "Participants": [],
-        "IsParent": is_parent,
-        "LinkedParentJID": linked_parent,
-        "IsDefaultSubGroup": default_sub,
-    })
+    let mut v = zero_group_info(&o.id);
+    merge(
+        &mut v,
+        json!({
+            "Name": o.subject.clone().unwrap_or_default(),
+            "ParticipantCount": count,
+            "IsParent": is_parent,
+            "LinkedParentJID": linked_parent,
+            "IsDefaultSubGroup": default_sub,
+        }),
+    );
+    v
 }
 
 /// `GET /user/my/groups` (GOWA `MyListGroups`, whatsmeow `GetJoinedGroups`):
@@ -883,7 +927,7 @@ pub async fn my_groups(device: &DeviceInstance) -> ApiResult<Value> {
             }
         }
     }
-    let mut data = group_info_values(device, &client, &found).await;
+    let mut data = group_info_values(&client, &found).await;
     for o in &overviews {
         if let Some(count) = truncated.get(&o.id.to_string()) {
             data.push(truncated_group_json(o, *count));
@@ -935,12 +979,52 @@ mod tests {
         let mut meta = GroupMetadata::new("1203@g.us".parse().unwrap());
         meta.subject = Some("Team".into());
         meta.is_locked = true;
-        let v = group_info_json(&meta, &[], &HashMap::new());
+        meta.creation_time = Some(1_700_000_000);
+        meta.participant_count = Some(42);
+        meta.admin_version_id = Some("av1".into());
+        meta.parent_membership_approval_required = true;
+        meta.is_suspended = true;
+        let v = group_info_json(&meta, &[]);
         assert_eq!(v["JID"], "1203@g.us");
         assert_eq!(v["Name"], "Team");
         assert_eq!(v["IsLocked"], true);
-        assert_eq!(v["GroupCreated"], "0001-01-01T00:00:00Z");
-        assert_eq!(v["Participants"], json!([]));
-        assert_eq!(v["ParticipantCount"], 0);
+        assert_eq!(v["NameSetAt"], "0001-01-01T00:00:00Z");
+        // UTC even with APP_TIMEZONE set (GOWA pins time.Local to UTC).
+        assert_eq!(v["GroupCreated"], "2023-11-14T22:13:20Z");
+        assert_eq!(v["Participants"], Value::Null);
+        assert_eq!(v["ParticipantCount"], 42);
+        assert_eq!(v["AnnounceVersionID"], "av1");
+        assert_eq!(v["DefaultMembershipApprovalMode"], "request_required");
+        assert_eq!(v["Suspended"], true);
+        assert_eq!(v["TopicDeleted"], false);
+        // Every key of the Go struct, nothing more.
+        let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
+        let zero = zero_group_info(&meta.id);
+        let expected: Vec<&String> = zero.as_object().unwrap().keys().collect();
+        assert_eq!(keys, expected);
+        assert_eq!(keys.len(), 32);
+    }
+
+    #[test]
+    fn group_participant_matches_parse_participant() {
+        let mut meta = GroupMetadata::new("1203@g.us".parse().unwrap());
+        let mut lid = crate::wa::sdk::GroupParticipant::new("99@lid".parse().unwrap());
+        lid.phone_number = Some("628111@s.whatsapp.net".parse().unwrap());
+        let mut pn =
+            crate::wa::sdk::GroupParticipant::new("628222@s.whatsapp.net".parse().unwrap());
+        pn.lid = Some("88@lid".parse().unwrap());
+        meta.participants = vec![lid, pn];
+        let v = group_info_json(&meta, &[]);
+        let p = &v["Participants"];
+        assert_eq!(
+            (&p[0]["LID"], &p[0]["PhoneNumber"]),
+            (&json!("99@lid"), &json!("628111@s.whatsapp.net"))
+        );
+        assert_eq!(
+            (&p[1]["LID"], &p[1]["PhoneNumber"]),
+            (&json!("88@lid"), &json!("628222@s.whatsapp.net"))
+        );
+        assert_eq!(p[0]["DisplayName"], "");
+        assert_eq!(p[0]["AddRequest"], Value::Null);
     }
 }

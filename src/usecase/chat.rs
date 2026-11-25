@@ -28,6 +28,15 @@ pub fn format_ts(secs: i64) -> String {
     crate::events::app_rfc3339(secs)
 }
 
+/// A whatsmeow `time.Time` marshalled by GOWA, which pins `time.Local` to
+/// UTC: RFC 3339 in UTC regardless of `APP_TIMEZONE`; Unix 0 = Go zero time.
+pub fn format_go_time(secs: i64) -> String {
+    if secs == 0 {
+        return "0001-01-01T00:00:00Z".to_owned();
+    }
+    crate::events::rfc3339(secs)
+}
+
 /// ozzo-validation struct errors: `"a: msg; b: msg."`, keys sorted.
 pub(crate) fn ozzo(errors: BTreeMap<&str, String>) -> ApiResult<()> {
     if errors.is_empty() {

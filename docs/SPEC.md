@@ -241,6 +241,7 @@ sendiri + diesel postgres untuk registry.
 | `--webhook-ignore-jids` | `WHATSAPP_WEBHOOK_IGNORE_JIDS` | — |
 | `--webhook-insecure-skip-verify` | `WHATSAPP_WEBHOOK_INSECURE_SKIP_VERIFY` | `false` |
 | `--webhook-device-merge-global` | `WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL` | `false` (`true` = device yang punya webhook sendiri tetap mengirim ke URL global, dengan secret & filter event global; URL yang sama tak dikirim dua kali) |
+| `--webhook-all-device-receipts` | `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS` | `false` (`true` = receipt `delivery` dari device tertaut kontak ikut diteruskan) |
 | `--webhook-include-outgoing` | `WHATSAPP_WEBHOOK_INCLUDE_OUTGOING` | `false` (`true` = webhook `message` juga untuk pesan yang dikirim lewat API; di GOWA env ini hanya ada di `.env.example`, tidak dibaca kode) |
 | `--whatsapp-proxy` | `WHATSAPP_PROXY` | — (`socks5://`/`socks5h://`/`http://`/`https://`, boleh `user:pass@`; untuk WebSocket + upload/unduh media; URL dari user tetap langsung; URL tak valid → gagal start) |
 | `--presence-on-connect` | `WHATSAPP_PRESENCE_ON_CONNECT` | `unavailable` |

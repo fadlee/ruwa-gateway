@@ -95,6 +95,8 @@ pub(super) struct MediaSettings {
     pub auto_download: bool,
     /// `WHATSAPP_IGNORE_STATUS_MEDIA`.
     pub ignore_status_media: bool,
+    /// `WHATSAPP_WEBHOOK_ALL_DEVICE_RECEIPTS`.
+    pub all_device_receipts: bool,
     pub auto_reject_call: bool,
     /// `WHATSAPP_AUTO_MARK_READ`.
     pub auto_mark_read: bool,
@@ -264,7 +266,7 @@ async fn handle(
                 receipt_type: r.r#type.as_wire_str().to_owned(),
                 timestamp: r.timestamp.as_secs(),
             };
-            if !events::should_forward_receipt(&view) {
+            if !events::should_forward_receipt(&view, media.all_device_receipts) {
                 return;
             }
             let Some(client) = device.client() else {
